@@ -133,7 +133,7 @@ fn reflect_inputs() -> Inputs {
 }
 
 /// What a described call may allocate at most, as measured when it was pinned; lower it when a change lowers the count.
-const MOST_PER_REFLECT: f64 = 10.0;
+const MOST_PER_REFLECT: f64 = 9.0;
 const MOST_PER_NEGATE: f64 = 1.0;
 const MOST_PER_ECHO: f64 = 0.0;
 

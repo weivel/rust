@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::definition::BoundDefinition;
 use super::holdings::{DescribedHandle, KeptAnswer};
 
-pub use super::members::Members;
+pub use super::members::{Members, MembersIter};
 
 /// An operation's inputs by parameter name.
 pub type Inputs = BTreeMap<String, Value>;

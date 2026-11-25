@@ -38,7 +38,7 @@ pub use declaration::{
 };
 pub use description::{
     Answers, BoundDefinition, CallStatus, DescribedAnswer, DescribedCallError, DescribedHandle,
-    Inputs, Members, Tree, Value,
+    Inputs, Members, MembersIter, Tree, Value,
 };
 pub(crate) use description::{Layouts, abi as description_abi};
 pub use entry::{

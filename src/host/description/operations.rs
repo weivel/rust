@@ -47,6 +47,8 @@ pub(crate) struct OperationPlan {
     steps: Vec<Step>,
     input_names: Vec<Arc<str>>,
     answers: Vec<(usize, BlockShape)>,
+    /// The answers' names, in their order, which every call's answers share.
+    answer_names: Arc<[Arc<str>]>,
     refusal: Option<(usize, BlockShape)>,
 }
 
@@ -128,6 +130,7 @@ impl OperationPlan {
             steps: Vec::new(),
             input_names: Vec::new(),
             answers: Vec::new(),
+            answer_names: Arc::new([]),
             refusal: None,
         };
         for (index, parameter) in parameters.iter().enumerate().skip(1) {
@@ -154,6 +157,11 @@ impl OperationPlan {
             };
             plan.steps.push(step);
         }
+        plan.answer_names = plan
+            .answers
+            .iter()
+            .map(|(index, _)| parameters[*index].name.clone())
+            .collect();
         Ok(plan)
     }
 
@@ -383,7 +391,7 @@ impl OperationPlan {
         blocks: &CallBlocks,
         carried: &mut Carried<'_>,
     ) -> Result<Members, String> {
-        let mut values = Members::with_capacity(self.answers.len());
+        let mut values = Members::named_from(self.answer_names.clone(), self.answers.len());
         let mut reader = Reader {
             layouts: target.layouts,
             answering: carried,
@@ -391,7 +399,7 @@ impl OperationPlan {
         for (answer, (index, _)) in self.answers.iter().enumerate() {
             let parameter = &self.parameters[*index];
             if let Some(value) = reader.answer(parameter, blocks.answers[answer])? {
-                values.push(parameter.name.clone(), value);
+                values.push_named(answer as u32, value);
             }
         }
         Ok(values)

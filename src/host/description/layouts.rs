@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use super::abi::{
     KIND_ARRAY, KIND_BYTES, KIND_CONTEXT, KIND_DEFINITION, KIND_F64, KIND_HANDLE, KIND_I64,
@@ -32,6 +33,20 @@ pub(crate) struct LaidOut {
     pub(crate) visible: Vec<Visible>,
     /// The size its leading `size` member is set to, if it has one.
     pub(crate) leading_size: Option<u32>,
+    /// The names of the visible members, in their order, which every answer holding the struct shares.
+    pub(crate) names: Arc<[Arc<str>]>,
+    /// The visible positions of the structs it holds by value that hold a leading size, themselves or below, which
+    /// a caller leaving them out still has written.
+    pub(crate) sized_structs: Vec<usize>,
+    /// Whether it holds a leading size, itself or in a struct it holds by value.
+    pub(crate) needs_sizes: bool,
+}
+
+impl LaidOut {
+    /// The visible position of the member called `name`.
+    pub(crate) fn position_of(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|held| &**held == name)
+    }
 }
 
 /// One member a caller writes and an answer carries: its index among the struct's members, and the offset of the
@@ -112,7 +127,7 @@ impl Builder<'_> {
         let fields = self.fields_of(&described)?;
         self.building.remove(name);
         let align = self.check(&described, &fields)?;
-        let visible = (0..described.members.len())
+        let visible: Vec<Visible> = (0..described.members.len())
             .filter(|index| described.is_visible(&described.members[*index]))
             .map(|index| Visible {
                 index,
@@ -124,6 +139,25 @@ impl Builder<'_> {
             })
             .collect();
         let leading_size = described.leading_size();
+        let names = visible
+            .iter()
+            .map(|visible: &Visible| described.members[visible.index].name.clone())
+            .collect();
+        let sized_structs: Vec<usize> = visible
+            .iter()
+            .enumerate()
+            .filter(|(_, visible)| {
+                let member = &described.members[visible.index];
+                member.kind == KIND_STRUCT
+                    && member
+                        .type_name
+                        .as_deref()
+                        .and_then(|type_name| self.built.get(type_name))
+                        .is_some_and(|nested| nested.needs_sizes)
+            })
+            .map(|(position, _)| position)
+            .collect();
+        let needs_sizes = leading_size.is_some() || !sized_structs.is_empty();
         let size = described.size;
         self.built.insert(
             name.to_owned(),
@@ -132,6 +166,9 @@ impl Builder<'_> {
                 align,
                 visible,
                 leading_size,
+                names,
+                sized_structs,
+                needs_sizes,
             },
         );
         Ok((size, align))

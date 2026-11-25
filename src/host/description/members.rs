@@ -1,5 +1,6 @@
-//! One struct's members by name, kept in one allocation in the order they were put, each name shared rather than
-//! copied: an answer's names are the description's own, taken from it at the bind.
+//! One struct's members by name, kept in one allocation in the order they were put. An answer's names are the
+//! description's own: one table of them per struct, built at the bind and shared by every answer, each member naming
+//! its place in the table, so reading an answer copies and counts no name.
 
 use std::fmt;
 use std::sync::Arc;
@@ -10,13 +11,22 @@ use super::value::Value;
 /// answer's in the description's order. Two are equal when they hold the same members, whatever their order.
 #[derive(Clone, Default)]
 pub struct Members {
-    entries: Vec<(Arc<str>, Value)>,
+    table: Option<Arc<[Arc<str>]>>,
+    entries: Vec<(Name, Value)>,
+}
+
+/// A member's name: its place in the table of the description's names, or a name of its own.
+#[derive(Clone)]
+enum Name {
+    Table(u32),
+    Own(Arc<str>),
 }
 
 impl Members {
     /// No members.
     pub const fn new() -> Members {
         Members {
+            table: None,
             entries: Vec::new(),
         }
     }
@@ -24,24 +34,44 @@ impl Members {
     /// No members, with room for `capacity` without allocating again.
     pub fn with_capacity(capacity: usize) -> Members {
         Members {
+            table: None,
             entries: Vec::with_capacity(capacity),
         }
     }
 
-    /// The member called `name`.
-    pub fn get(&self, name: &str) -> Option<&Value> {
+    /// No members, with room for `capacity`, named from `table`.
+    pub(crate) fn named_from(table: Arc<[Arc<str>]>, capacity: usize) -> Members {
+        Members {
+            table: Some(table),
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn spelled<'a>(&'a self, name: &'a Name) -> &'a str {
+        match name {
+            Name::Table(index) => self
+                .table
+                .as_ref()
+                .map_or("", |table| &*table[*index as usize]),
+            Name::Own(name) => name,
+        }
+    }
+
+    fn position(&self, name: &str) -> Option<usize> {
         self.entries
             .iter()
-            .find(|(held, _)| **held == *name)
-            .map(|(_, value)| value)
+            .position(|(held, _)| self.spelled(held) == name)
+    }
+
+    /// The member called `name`.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.position(name).map(|index| &self.entries[index].1)
     }
 
     /// The member called `name`, to change.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
-        self.entries
-            .iter_mut()
-            .find(|(held, _)| **held == *name)
-            .map(|(_, value)| value)
+        let index = self.position(name)?;
+        Some(&mut self.entries[index].1)
     }
 
     /// Whether a member is called `name`.
@@ -55,7 +85,7 @@ impl Members {
         match self.get_mut(&name) {
             Some(held) => Some(std::mem::replace(held, value)),
             None => {
-                self.entries.push((name, value));
+                self.entries.push((Name::Own(name), value));
                 None
             }
         }
@@ -63,13 +93,13 @@ impl Members {
 
     /// Takes the member `name` out.
     pub fn remove(&mut self, name: &str) -> Option<Value> {
-        let index = self.entries.iter().position(|(held, _)| **held == *name)?;
+        let index = self.position(name)?;
         Some(self.entries.remove(index).1)
     }
 
     /// The names, in order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|(name, _)| &**name)
+        self.entries.iter().map(|(name, _)| self.spelled(name))
     }
 
     /// The values, in order.
@@ -79,7 +109,9 @@ impl Members {
 
     /// Each name and its value, in order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.entries.iter().map(|(name, value)| (&**name, value))
+        self.entries
+            .iter()
+            .map(|(name, value)| (self.spelled(name), value))
     }
 
     /// How many members.
@@ -92,9 +124,9 @@ impl Members {
         self.entries.is_empty()
     }
 
-    /// Puts a member the caller knows is not held yet, sharing its name.
-    pub(crate) fn push(&mut self, name: Arc<str>, value: Value) {
-        self.entries.push((name, value));
+    /// Puts the member named at `index` of the table, which the caller knows is not held yet.
+    pub(crate) fn push_named(&mut self, index: u32, value: Value) {
+        self.entries.push((Name::Table(index), value));
     }
 }
 
@@ -134,18 +166,47 @@ impl IntoIterator for Members {
     type IntoIter = std::vec::IntoIter<(Arc<str>, Value)>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
+        let table = self.table;
+        self.entries
+            .into_iter()
+            .map(|(name, value)| match name {
+                Name::Table(index) => (
+                    table
+                        .as_ref()
+                        .map_or_else(|| Arc::from(""), |table| table[index as usize].clone()),
+                    value,
+                ),
+                Name::Own(name) => (name, value),
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
 impl<'a> IntoIterator for &'a Members {
     type Item = (&'a str, &'a Value);
-    type IntoIter = std::iter::Map<
-        std::slice::Iter<'a, (Arc<str>, Value)>,
-        fn(&'a (Arc<str>, Value)) -> (&'a str, &'a Value),
-    >;
+    type IntoIter = MembersIter<'a>;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.entries.iter().map(|(name, value)| (&**name, value))
+    fn into_iter(self) -> MembersIter<'a> {
+        MembersIter {
+            members: self,
+            next: 0,
+        }
+    }
+}
+
+/// Each name and value of [`Members`], in order.
+pub struct MembersIter<'a> {
+    members: &'a Members,
+    next: usize,
+}
+
+impl<'a> Iterator for MembersIter<'a> {
+    type Item = (&'a str, &'a Value);
+
+    fn next(&mut self) -> Option<(&'a str, &'a Value)> {
+        let (name, value) = self.members.entries.get(self.next)?;
+        self.next += 1;
+        Some((self.members.spelled(name), value))
     }
 }

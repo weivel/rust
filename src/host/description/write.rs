@@ -294,7 +294,8 @@ impl<'a> Writer<'a> {
     }
 
     /// Writes `members` as the struct `laid_out` at `address`, its leading size set and a member left out at its
-    /// kind's zero.
+    /// kind's zero, which the zeroed block holds already: only the members given are written, and a struct held by
+    /// value that is left out only when a leading size lies inside it.
     fn write_struct(
         &mut self,
         address: usize,
@@ -310,30 +311,37 @@ impl<'a> Writer<'a> {
             ));
         }
         let described = &laid_out.described;
-        let is_visible = |name: &str| {
-            laid_out
-                .visible
-                .iter()
-                .any(|visible| &*described.members[visible.index].name == name)
-        };
-        if let Some(unknown) = members.keys().find(|name| !is_visible(name)) {
-            return Err(format!(
-                "{} has no member {unknown} a caller writes",
-                self.spelled(place)
-            ));
+        let mut positions = Stack::new();
+        for name in members.keys() {
+            match laid_out.position_of(name) {
+                Some(position) => positions.push(position),
+                None => {
+                    return Err(format!(
+                        "{} has no member {name} a caller writes",
+                        self.spelled(place)
+                    ));
+                }
+            }
         }
         if let Some(size) = laid_out.leading_size {
             // SAFETY: a struct with a leading size holds it at offset 0, inside its block.
             unsafe { put(address, size) };
         }
-        for visible in &laid_out.visible {
+        for (given, value) in members.values().enumerate() {
+            let visible = laid_out.visible[positions[given]];
             let member = &described.members[visible.index];
-            let value = members.get(&member.name);
-            let count = self.write_member(address, member, value, place, depth)?;
+            let count = self.write_member(address, member, Some(value), place, depth)?;
             if let Some(offset) = visible.count_offset {
                 // SAFETY: a count is a SIZE member of the same struct.
                 unsafe { put(address + offset, count) };
             }
+        }
+        for position in &laid_out.sized_structs {
+            if members.contains_key(&laid_out.names[*position]) {
+                continue;
+            }
+            let member = &described.members[laid_out.visible[*position].index];
+            self.write_member(address, member, None, place, depth)?;
         }
         Ok(())
     }
