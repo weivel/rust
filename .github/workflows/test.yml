@@ -18,3 +18,16 @@ jobs:
       cargo_pretest: 'run -p native'
       cargo_test: 'test --workspace'
       cargo_args: '--locked'
+
+  benchmarks:
+    uses: intisy/workflows/.github/workflows/test.yml@main
+    with:
+      toolchains: cmake cargo
+      runners: '["ubuntu-latest","windows-latest","macos-latest"]'
+      cmake_version: '4.4.4'
+      cmake_configure: ''
+      cmake_build: ''
+      cmake_test: ''
+      cargo_pretest: 'run -p native'
+      cargo_test: 'test --release --test benchmarks'
+      cargo_args: '--locked'
