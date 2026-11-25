@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::shapes::DriverFailure;
+use super::shapes::texts_json;
 use crate::context::{Context, HostLog, LogRecord, Pending, pending};
 use crate::core::{
     CoreBinary, CoreOptions, EdgeSource, ErrorSink, Failure, Handle, LogLevel, Manifest,
     ServiceOffer, ServiceWant,
 };
-use crate::host::{Entry, Finished, Host, HostOptions, HostScheduler};
+use crate::host::{DescriptionCheck, Entry, Finished, Host, HostOptions, HostScheduler};
 use crate::standard::Json;
 use crate::timer::{ScheduledTask, Scheduler, TaskCallback};
 
@@ -159,6 +160,7 @@ impl DriverWorld {
     pub(crate) fn new(
         binary: &CoreBinary,
         core: CoreOptions,
+        description_check: Option<Arc<dyn DescriptionCheck>>,
     ) -> Result<DriverWorld, DriverFailure> {
         let time = VirtualTime::default();
         let kept = Arc::new(Kept::default());
@@ -177,7 +179,7 @@ impl DriverWorld {
                         deadline.map_or(Json::Null, |at| Json::Number(at as f64)),
                     ]));
                 })),
-                description_check: None,
+                description_check,
             },
         )
         .map_err(|answer| format!("the driver's host could not be created: {answer}"))?;
@@ -271,6 +273,26 @@ impl DriverWorld {
 
     pub(crate) fn failures(&self) -> Vec<Failure> {
         locked(&self.kept.failures).clone()
+    }
+
+    /// How many failures the sink and records the log hold now, to read what was reported from then on.
+    pub(crate) fn reported_marks(&self) -> (usize, usize) {
+        (self.failures().len(), self.logs().len())
+    }
+
+    /// Every failure the sink and every record the log received since `marks`, as texts.
+    pub(crate) fn reported_since(&self, (failures, logs): (usize, usize)) -> Json {
+        let sunk = self
+            .failures()
+            .into_iter()
+            .skip(failures)
+            .map(|failure| format!("{failure:?}"));
+        let logged = self
+            .logs()
+            .into_iter()
+            .skip(logs)
+            .map(|record| format!("{record:?}"));
+        texts_json(sunk.chain(logged))
     }
 
     /// How many records the log and the error sink hold now, counting only the log's errors when asked.

@@ -15,13 +15,13 @@ const STATUS_OUT_OF_MEMORY: c_int = 4;
 
 /// `weivel_standard_refusal`, declared by hand from `standard.h`.
 #[repr(C)]
-struct StandardRefusal {
-    size: u32,
-    code: u32,
-    detail: *const c_char,
-    fix: *const c_char,
-    path: *const c_char,
-    storage: *mut c_void,
+pub(crate) struct StandardRefusal {
+    pub(crate) size: u32,
+    pub(crate) code: u32,
+    pub(crate) detail: *const c_char,
+    pub(crate) fix: *const c_char,
+    pub(crate) path: *const c_char,
+    pub(crate) storage: *mut c_void,
 }
 
 type Check = unsafe extern "C" fn(*const c_void, *mut StandardRefusal) -> c_int;

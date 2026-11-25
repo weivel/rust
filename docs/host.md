@@ -39,17 +39,19 @@ mistake for an id a loaded C library declares. `Host::load_library` loads a C li
 which the caller builds, and the library's path. A service of bytes functions is registered as a `LibraryService`,
 whose `call` lends the input for the call and answers the library's bytes in place as `LibraryBytes`, released through
 the library's release symbol when dropped and keeping the binary open until then, so there is no copy. A definition
-service is registered awaiting releases as a `ForeignObject` carrying the very address its symbol answered, called
+service declaring no description is registered awaiting releases as a `ForeignObject` carrying the very address its symbol answered, called
 once at the load; a definition answering NULL, or a struct whose `size` is below `2 * sizeof(void *)`, refuses the
 load as the caller's mistake. A service that declares a `description` loads only on a host given a description check
 in `HostOptions`, which `standard::StandardDescriptions` provides: `weivel_standard_description_check`, then
 `weivel_standard_description_answers` with the definition, each refusal the caller's mistake. A described definition is
-registered as the same `ForeignObject`, its description checked but not yet bound. A declaration of contracts alone
+registered awaiting releases as the `BoundDefinition` bound from its description, standing for the very address its
+symbol answered, as [descriptions.md](descriptions.md) states. A declaration of contracts alone
 loads and registers nothing; its contracts stay on the declaration, and no capability a plugin provides is checked
 against them yet. An id declared twice, or registered under the host already by a plugin, another live library or the
 host itself, refuses the load.
 
-`Host::unload_library` closes the library to calls at once, so a later call through its bytes service answers
+`Host::unload_library` releases every handle its bound definitions answered and every answer carrying a definition
+that nobody released, while the binary is still mapped, closes the library to calls at once, so a later call through its bytes service answers
 `Unloaded`, and unregisters every service, which revokes each definition to its holders. A holder hears the
 revocation awaiting its release and lets go with `Context::release_holding`; one released, quarantined or forgotten
 has let go with it. The binary closes once the core has told the host that nothing holds any of its definitions, no
@@ -64,8 +66,8 @@ reached through size-prefixed C tables of `extern "C"` functions, never through 
 entry with `weivel_rust::export_entry!`, under `weivel_rust_entry` or a symbol of its choosing, and
 `Host::load_entry(path, symbol)` answers an `Entry` the host registers as any other. Each activate is handed the host's
 context table of its plugin, which the plugin's side wraps in the same safe `Context`. A service object crosses as its
-provider's address, so identity is the address: a consumer in the host's binary receives a `ForeignObject`, a plugin
-across the seam receives the address of the host's own object, and a typed view of one is a `#[repr(C)]` struct both
+provider's address, so identity is the address: a consumer in the host's binary receives a `ForeignObject` or, for a
+described definition, its `BoundDefinition`, a plugin across the seam receives the address of the host's own object, and a typed view of one is a `#[repr(C)]` struct both
 sides compile. Every function on both sides catches a panic: a panic in a plugin's activate or deactivate is told to
 the host's error sink and finishes it as failed, so the host quarantines that plugin and goes on. The library stays
 open until the host is freed, since a plugin's code may still run after its release.

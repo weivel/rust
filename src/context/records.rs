@@ -8,6 +8,7 @@ use super::Context;
 use super::pending::Settle;
 use crate::core::{Answer, Handle, Number, ReachKind, Refusal};
 use crate::handles::{Handles, Reservation};
+use crate::host::BoundDefinition;
 
 /// A provider's own object: a service or an implementation of a capability. A consumer is handed exactly this
 /// object, never a copy or a wrapper, so identity is [`Arc::ptr_eq`].
@@ -73,13 +74,17 @@ impl ForeignObject {
     }
 }
 
-/// The address that stands for `object` where it crosses to another binary: a [`ForeignObject`]'s own address, and
-/// for any other object the address of the provider's own value, which is the same for every clone of it.
+/// The address that stands for `object` where it crosses to another binary: a [`ForeignObject`]'s own address, a
+/// [`BoundDefinition`]'s definition, and for any other object the address of the provider's own value, which is the
+/// same for every clone of it.
 pub fn address_of(object: &Object) -> usize {
-    match object.downcast_ref::<ForeignObject>() {
-        Some(foreign) => foreign.address(),
-        None => Arc::as_ptr(object) as *const () as usize,
+    if let Some(foreign) = object.downcast_ref::<ForeignObject>() {
+        return foreign.address();
     }
+    if let Some(bound) = object.downcast_ref::<BoundDefinition>() {
+        return bound.address();
+    }
+    Arc::as_ptr(object) as *const () as usize
 }
 
 /// What the core reports about a plugin.

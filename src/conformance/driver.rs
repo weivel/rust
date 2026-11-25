@@ -2,14 +2,16 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::observations::observe;
 use super::shapes::{self, DriverFailure, Members};
 use super::world::DriverWorld;
-use super::{consume, library, lifecycle, want};
+use super::{consume, description, library, lifecycle, want};
 use crate::context::LogRecord;
 use crate::core::{CoreBinary, CoreOptions, Failure};
-use crate::standard::{Json, StandardJson};
+use crate::host::DescriptionCheck;
+use crate::standard::{Json, StandardDescriptions, StandardJson};
 
 /// One layer vector of the kit, as the standard's reader read it.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +47,7 @@ pub struct LayerDriver {
     core: CoreBinary,
     json: StandardJson,
     echo_library: Option<PathBuf>,
+    described_library: Option<(PathBuf, StandardDescriptions)>,
 }
 
 impl LayerDriver {
@@ -54,12 +57,24 @@ impl LayerDriver {
             core,
             json,
             echo_library: None,
+            described_library: None,
         }
     }
 
     /// The driver, with the path of the core's `echo` test library a `library` vector loads.
     pub fn with_echo_library(mut self, path: impl Into<PathBuf>) -> LayerDriver {
         self.echo_library = Some(path.into());
+        self
+    }
+
+    /// The driver, with the path of the standard's `described` test library a `description` vector loads, and the
+    /// description check its host runs, the standard's own.
+    pub fn with_described_library(
+        mut self,
+        path: impl Into<PathBuf>,
+        check: StandardDescriptions,
+    ) -> LayerDriver {
+        self.described_library = Some((path.into(), check));
         self
     }
 
@@ -129,7 +144,14 @@ impl LayerDriver {
         } else {
             CoreOptions::default()
         };
-        let mut world = DriverWorld::new(&self.core, options)?;
+        let check = match vector.op.as_str() {
+            "description" => self
+                .described_library
+                .as_ref()
+                .map(|(_, check)| Arc::new(check.clone()) as Arc<dyn DescriptionCheck>),
+            _ => None,
+        };
+        let mut world = DriverWorld::new(&self.core, options, check)?;
         let observed = self.drive(vector, given, then, &mut world)?;
         let witness = LayerWitness {
             id: vector.id.clone(),
@@ -159,6 +181,16 @@ impl LayerDriver {
                     )
                 })?;
                 let run = library::drive(given, world, echo)?;
+                observe(&vector.id, then, &run.observers(world))
+            }
+            "description" => {
+                let (described, _) = self.described_library.as_ref().ok_or_else(|| {
+                    format!(
+                        "the vector {} loads the described library, and the driver was given none",
+                        vector.id
+                    )
+                })?;
+                let run = description::drive(given, world, described)?;
                 observe(&vector.id, then, &run.observers(world))
             }
             "consume" => {

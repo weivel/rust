@@ -30,7 +30,9 @@ pub struct StructLayout {
 }
 
 /// The size of what a field projection points at, the projection never being called.
-const fn pointee_size<Struct, Field>(_projection: fn(*const Struct) -> *const Field) -> usize {
+pub(crate) const fn pointee_size<Struct, Field>(
+    _projection: fn(*const Struct) -> *const Field,
+) -> usize {
     std::mem::size_of::<Field>()
 }
 

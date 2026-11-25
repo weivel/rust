@@ -24,6 +24,9 @@ mod wrapper;
 #[cfg(test)]
 mod wrapper_tests;
 
+pub(crate) use abi::{
+    STATUS_MALFORMED, STATUS_NONE, STATUS_OK, STATUS_OUT_OF_MEMORY, STATUS_REFUSED,
+};
 pub use answer::{Answer, RefusalStatus};
 pub use codes::{
     Axis, Bound, CapabilityChange, CapacityQuestion, EdgeSource, HandleCondition, LogLevel,

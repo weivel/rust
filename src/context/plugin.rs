@@ -3,11 +3,13 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use super::enums::DescribedEnums;
 use super::link::{Link, SeamCalls};
 use super::log::PluginLog;
 use super::records::{Object, PluginEvent, PluginListener, address_of};
 use super::state::ContextState;
-use crate::core::{FailureKind, Handle, Manifest};
+use crate::core::{Answer, FailureKind, Handle, Manifest};
+use crate::host::BoundDefinition;
 
 pub(crate) struct ContextInner {
     pub(crate) link: Link,
@@ -119,6 +121,28 @@ impl Context {
             context: self.clone(),
             listener: registration,
         }
+    }
+
+    /// The enums of the description that bound `service`, each by the name its header spells, with `weivel_status`
+    /// beside them; none for an object no description bound, as one a plugin registered or a definition across the
+    /// plugin seam. A plugin reads an enum's numbers here rather than copying them from a header.
+    pub fn enums_of(&self, service: &Object) -> Option<DescribedEnums> {
+        service
+            .downcast_ref::<BoundDefinition>()
+            .map(|bound| bound.enums().clone())
+    }
+
+    /// Exactly the enums and entries `names` asks for, read from what [`Context::enums_of`] answered for `of`; the
+    /// caller's mistake, naming the first enum or entry the description lacks, and for no enums at all.
+    pub fn require_enums(
+        &self,
+        enums: Option<&DescribedEnums>,
+        names: &[(&str, &[&str])],
+        of: &str,
+    ) -> Result<DescribedEnums, Answer> {
+        enums
+            .ok_or_else(|| Answer::Mistake(format!("{of} carries no described enums")))?
+            .require(names, of)
     }
 
     /// Whether the core has forgotten the plugin, so every call through this context answers detached.

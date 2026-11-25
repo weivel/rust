@@ -1,8 +1,8 @@
 # `standard`
 
 The standard's defaults, reached through the standard's own binary, which its caller names by path. Its files are
-listed in [its source doc](source/src/standard/README.md). So far it holds the standard's JSON reader and its
-description checks.
+listed in [its source doc](source/src/standard/README.md). So far it holds the standard's JSON reader, its
+description checks and the list of the standard's structs the crate declares by hand.
 
 `StandardJson::load` opens the standard's shared binary with the same loader the core's binary is opened with and
 resolves the functions of `json.h`, each declared by hand. `StandardJson::parse` reads one document through the
@@ -15,4 +15,8 @@ standard read.
 the refusal's release from the same binary, and is the host's `DescriptionCheck`: a description a C library's service
 declares is checked whole, then held to the definition its service's symbol answered, and a refusal of either is the
 caller's mistake naming the check and the path it refused at. The `weivel_standard_refusal` it hands in is declared by
-hand and not yet held to the standard's `layouts` program.
+hand.
+
+`declarations::standard_struct_layouts` lists that refusal and every struct of `description.h` and `value.h` the
+description binder declares, each field as this compiler lays it out, and a test holds every one to what the
+standard's `layouts` program prints, the way the core's structs are held to the core's.

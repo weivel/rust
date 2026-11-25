@@ -3,8 +3,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use weivel_rust::context::{ForeignObject, Object};
+use weivel_rust::context::Object;
 use weivel_rust::core::Answer;
+use weivel_rust::host::BoundDefinition;
 use weivel_rust::host::{
     FunctionKind, Host, HostOptions, HostScheduler, LibraryAnswer, LibraryContract,
     LibraryDeclaration, LibraryFunction, LibraryService, LibraryServiceDeclaration,
@@ -15,7 +16,7 @@ use crate::kept_host;
 use crate::support::shared_library;
 
 /// A process maps a library once however often it is opened, so these tests take turns with each other.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+pub static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn function(name: &str, symbol: &str, kind: FunctionKind) -> LibraryFunction {
     LibraryFunction {
@@ -48,7 +49,7 @@ fn declaration(import_name: &str, services: Vec<LibraryServiceDeclaration>) -> L
     }
 }
 
-fn described_host() -> Host {
+pub fn described_host() -> Host {
     let check = StandardDescriptions::load(shared_library("weivel_standard"))
         .expect("the standard's description checks load");
     kept_host(
@@ -61,7 +62,7 @@ fn described_host() -> Host {
     .0
 }
 
-fn described_declaration(walker_description: &str) -> LibraryDeclaration {
+pub fn described_declaration(walker_description: &str) -> LibraryDeclaration {
     declaration(
         "described",
         vec![
@@ -95,7 +96,7 @@ fn a_definition_whose_description_the_standard_passes_loads() {
     assert!(
         services
             .iter()
-            .all(|(_, object)| object.is::<ForeignObject>())
+            .all(|(_, object)| object.is::<BoundDefinition>())
     );
     host.destroy().wait();
 }

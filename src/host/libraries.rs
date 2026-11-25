@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::declaration::{LibraryDeclaration, LibraryServiceDeclaration, mistake_in};
+use super::description::{Holdings, Mapping, bind_described};
 use super::state::{Host, HostShared, change_count};
 use crate::context::{ForeignObject, Object, ServiceRegistration};
 use crate::core::{Answer, BytesFunction, FailureKind, LibraryBinary, LibraryBytes};
@@ -95,6 +96,8 @@ struct LoadedInner {
     declaration: LibraryDeclaration,
     objects: Vec<(String, Object)>,
     lifetime: Arc<Lifetime>,
+    /// Every handle and kept answer its bound definitions answered that nobody has released yet.
+    holdings: Arc<Holdings>,
     /// The registrations it made; `None` once an unload or the destroy took it.
     registrations: Mutex<Option<Vec<ServiceRegistration>>>,
 }
@@ -121,8 +124,9 @@ impl LoadedLibrary {
         &self.inner.declaration
     }
 
-    /// Each service's id and the object registered under it: a [`LibraryService`], or a [`ForeignObject`] carrying
-    /// the address a definition answered, which dies with the binary, since holding this keeps nothing open.
+    /// Each service's id and the object registered under it: a [`LibraryService`], a [`ForeignObject`] carrying the
+    /// address a definition declaring no description answered, which dies with the binary, since holding this keeps
+    /// nothing open, or the [`BoundDefinition`](super::BoundDefinition) a described definition was bound as.
     pub fn services(&self) -> Vec<(String, Object)> {
         self.inner.objects.clone()
     }
@@ -167,16 +171,17 @@ fn taken_id_text(id: &str) -> String {
 
 impl Host {
     /// Loads a C library and registers each service it declares under `WEIVEL_HOST`: a service of bytes functions as a
-    /// [`LibraryService`], and a definition service as a [`ForeignObject`] carrying the address its definition's
-    /// symbol answered, called once here, registered awaiting releases, after the host's description check has passed
-    /// the description its service declares. An activation plan counts each as provided by the host, and a consumer
+    /// [`LibraryService`], and a definition service, registered awaiting releases, as a [`ForeignObject`] carrying
+    /// the address its definition's symbol answered, called once here, or, for one declaring a description, as the
+    /// [`BoundDefinition`](super::BoundDefinition) bound from it once the host's description check has passed it. An activation plan counts each as provided by the host, and a consumer
     /// resolving one receives that very object. A declaration of contracts alone loads and registers nothing. A load
     /// that fails once a service is registered is undone as an unload.
     ///
     /// Answers the library; [`Answer::Mistake`], told to no sink, for a declaration [`LibraryDeclaration`]'s rules
     /// refuse, an id a registration under this host holds already, a path that names no library, a library lacking a
     /// declared symbol, a definition answering NULL or a struct whose `size` is below `2 * sizeof(void *)`, a
-    /// description declared on a host given no description check, or one the check refuses; the core's refusal of a
+    /// description declared on a host given no description check, one the check refuses, or one this platform's
+    /// layout disagrees with or the binding cannot bind; the core's refusal of a
     /// registration; [`Answer::Destroyed`] once the destroy has been called, before any mistake is judged.
     pub fn load_library(
         &self,
@@ -207,7 +212,8 @@ impl Host {
         Ok(library)
     }
 
-    /// Unloads a library: closes it to calls at once, so every later call through one of its bytes services answers
+    /// Unloads a library: releases every handle its bound definitions answered and every answer carrying a definition
+    /// that nobody released, while its binary is still mapped, closes it to calls at once, so every later call through one of its bytes services answers
     /// [`LibraryAnswer::Unloaded`], and unregisters every service it registered, which revokes each definition to its
     /// holders. Its binary closes once no call runs in it, no bytes it answered are held, and the core has told the
     /// host that nothing holds any of its definitions. Answers true; false, doing nothing, for a library unloaded
@@ -245,12 +251,13 @@ impl Host {
         let lifetime = Arc::new(Lifetime {
             binary: Mutex::new(Some(binary.clone())),
         });
+        let holdings = Holdings::of_a_library();
         let objects = declaration
             .services
             .iter()
             .map(|service| {
                 let object = if service.is_a_definition() {
-                    self.definition(&binary, service)?
+                    self.definition(&binary, service, &holdings)?
                 } else {
                     bytes_service(&binary, service, &lifetime)?
                 };
@@ -264,6 +271,7 @@ impl Host {
                 declaration: declaration.clone(),
                 objects,
                 lifetime,
+                holdings,
                 registrations: Mutex::new(Some(Vec::new())),
             }),
         })
@@ -271,8 +279,9 @@ impl Host {
 
     fn definition(
         &self,
-        binary: &LibraryBinary,
+        binary: &Arc<LibraryBinary>,
         service: &LibraryServiceDeclaration,
+        holdings: &Arc<Holdings>,
     ) -> Result<Object, Answer> {
         let address = binary.definition(&service.functions[0].symbol)?;
         if let Some(symbol) = &service.description {
@@ -283,7 +292,12 @@ impl Host {
                     service.id
                 )));
             };
-            check.check(&binary.described(symbol, address)?)?;
+            let described = binary.described(symbol, address)?;
+            check.check(&described)?;
+            let mapping = Mapping::Library(Arc::downgrade(binary));
+            let bound =
+                bind_described(&described, mapping, holdings.clone()).map_err(Answer::Mistake)?;
+            return Ok(Arc::new(bound));
         }
         Ok(Arc::new(ForeignObject::at(address)))
     }
@@ -398,6 +412,7 @@ impl HostShared {
         let Some(registrations) = library.take_for_unloading() else {
             return false;
         };
+        library.inner.holdings.release_all();
         library.inner.lifetime.close_to_calls();
         let ids = library
             .declaration()
@@ -438,6 +453,7 @@ impl HostShared {
         let libraries = std::mem::take(&mut self.records().libraries);
         for library in libraries {
             if library.take_for_unloading().is_some() {
+                library.inner.holdings.release_all();
                 library.inner.lifetime.close_to_calls();
             }
         }
