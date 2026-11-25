@@ -3,6 +3,7 @@ The `context` module: a plugin's context and every call it makes, the records th
 <!-- generated: source-children -->
 - [capabilities.rs](../../../../src/context/capabilities.rs) - a context's calls about capabilities: provide, list and watch
 - [contexts.rs](../../../../src/context/contexts.rs) - the surface a host builds, opens, verifies, releases, quarantines and forgets contexts through
+- [link.rs](../../../../src/context/link.rs) - what a context reaches the core through: the host's own contexts, or the host's context table across the plugin seam
 - [log.rs](../../../../src/context/log.rs) - the host's log and a plugin's log
 - [mod.rs](../../../../src/context/mod.rs) - the module's public surface
 - [pending.rs](../../../../src/context/pending.rs) - `Pending`, a result that comes later: a future, a blocking wait or a callback

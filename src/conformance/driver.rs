@@ -1,12 +1,12 @@
 //! Reading the kit's layer vectors, and running one through a host of its own.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::observations::observe;
 use super::shapes::{self, DriverFailure, Members};
 use super::world::DriverWorld;
-use super::{consume, lifecycle, want};
+use super::{consume, library, lifecycle, want};
 use crate::context::LogRecord;
 use crate::core::{CoreBinary, CoreOptions, Failure};
 use crate::standard::{Json, StandardJson};
@@ -44,12 +44,23 @@ pub struct LayerWitness {
 pub struct LayerDriver {
     core: CoreBinary,
     json: StandardJson,
+    echo_library: Option<PathBuf>,
 }
 
 impl LayerDriver {
     /// A driver over the core's binary and the standard's JSON reader, each loaded by its caller.
     pub fn new(core: CoreBinary, json: StandardJson) -> LayerDriver {
-        LayerDriver { core, json }
+        LayerDriver {
+            core,
+            json,
+            echo_library: None,
+        }
+    }
+
+    /// The driver, with the path of the core's `echo` test library a `library` vector loads.
+    pub fn with_echo_library(mut self, path: impl Into<PathBuf>) -> LayerDriver {
+        self.echo_library = Some(path.into());
+        self
     }
 
     /// Reads every layer vector under `directory`, at any depth, sorted by id. A vector the reader refuses, or whose
@@ -119,7 +130,7 @@ impl LayerDriver {
             CoreOptions::default()
         };
         let mut world = DriverWorld::new(&self.core, options)?;
-        let observed = drive(vector, given, then, &mut world)?;
+        let observed = self.drive(vector, given, then, &mut world)?;
         let witness = LayerWitness {
             id: vector.id.clone(),
             observed,
@@ -131,28 +142,41 @@ impl LayerDriver {
     }
 }
 
-fn drive(
-    vector: &LayerVector,
-    given: &Members,
-    then: &Members,
-    world: &mut DriverWorld,
-) -> Result<Json, DriverFailure> {
-    match vector.op.as_str() {
-        "consume" => {
-            let run = consume::drive(given, world)?;
-            observe(&vector.id, then, &run.observers(world))
+impl LayerDriver {
+    fn drive(
+        &self,
+        vector: &LayerVector,
+        given: &Members,
+        then: &Members,
+        world: &mut DriverWorld,
+    ) -> Result<Json, DriverFailure> {
+        match vector.op.as_str() {
+            "library" => {
+                let echo = self.echo_library.as_deref().ok_or_else(|| {
+                    format!(
+                        "the vector {} loads the echo library, and the driver was given none",
+                        vector.id
+                    )
+                })?;
+                let run = library::drive(given, world, echo)?;
+                observe(&vector.id, then, &run.observers(world))
+            }
+            "consume" => {
+                let run = consume::drive(given, world)?;
+                observe(&vector.id, then, &run.observers(world))
+            }
+            "want" => {
+                let run = want::drive(given, world)?;
+                observe(&vector.id, then, &run.observers(world))
+            }
+            "lifecycle" => {
+                let run = lifecycle::drive(given, world)?;
+                observe(&vector.id, then, &run.observers(world))
+            }
+            other => Err(format!(
+                "the vector {} has the op {other}, which this driver does not drive",
+                vector.id
+            )),
         }
-        "want" => {
-            let run = want::drive(given, world)?;
-            observe(&vector.id, then, &run.observers(world))
-        }
-        "lifecycle" => {
-            let run = lifecycle::drive(given, world)?;
-            observe(&vector.id, then, &run.observers(world))
-        }
-        other => Err(format!(
-            "the vector {} has the op {other}, which this driver does not drive",
-            vector.id
-        )),
     }
 }

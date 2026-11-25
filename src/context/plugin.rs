@@ -3,13 +3,14 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use super::link::{Link, SeamCalls};
 use super::log::PluginLog;
-use super::records::{PluginEvent, PluginListener};
+use super::records::{Object, PluginEvent, PluginListener, address_of};
 use super::state::ContextState;
 use crate::core::{FailureKind, Handle, Manifest};
 
 pub(crate) struct ContextInner {
-    pub(crate) state: Arc<ContextState>,
+    pub(crate) link: Link,
     pub(crate) plugin: Handle,
     pub(crate) manifest: Manifest,
     made_after: u64,
@@ -18,6 +19,9 @@ pub(crate) struct ContextInner {
     token: AtomicU64,
     detached: AtomicBool,
     silenced: AtomicBool,
+    /// What a context across the plugin seam registered or provided, kept alive while the context lives, since the
+    /// host holds only their addresses.
+    crossed: Mutex<Vec<Object>>,
 }
 
 /// What a plugin sees of the core, and the only way it reaches any of it: services to get, want, watch, list and
@@ -58,9 +62,22 @@ impl Listening {
 impl Context {
     pub(crate) fn new(state: Arc<ContextState>, plugin: Handle, manifest: Manifest) -> Context {
         let made_after = state.core.last_sequence();
+        Context::linked(Link::Local(state), plugin, manifest, made_after)
+    }
+
+    /// A context of a plugin across the plugin seam, reaching the host's context through its table.
+    pub(crate) fn across_the_seam(
+        seam: Arc<dyn SeamCalls>,
+        plugin: Handle,
+        manifest: Manifest,
+    ) -> Context {
+        Context::linked(Link::Seam(seam), plugin, manifest, 0)
+    }
+
+    fn linked(link: Link, plugin: Handle, manifest: Manifest, made_after: u64) -> Context {
         Context {
             inner: Arc::new(ContextInner {
-                state,
+                link,
                 plugin,
                 manifest,
                 made_after,
@@ -69,6 +86,7 @@ impl Context {
                 token: AtomicU64::new(0),
                 detached: AtomicBool::new(false),
                 silenced: AtomicBool::new(false),
+                crossed: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -86,7 +104,7 @@ impl Context {
     /// The plugin's log, which the host directs.
     pub fn log(&self) -> PluginLog {
         PluginLog {
-            state: self.inner.state.clone(),
+            link: self.inner.link.clone(),
             name: self.inner.manifest.import_name.clone(),
         }
     }
@@ -143,12 +161,24 @@ impl Context {
             .map(|(_, listener)| listener.clone())
             .collect();
         for listener in listeners {
-            self.inner.state.call_back(
+            self.inner.link.call_back(
                 || listener(event),
                 FailureKind::PluginCallback,
                 "a plugin's listener panicked",
-                None,
             );
+        }
+    }
+
+    /// The object this context handed across the seam at `address`, if it handed one.
+    pub(crate) fn crossed_at(&self, address: usize) -> Option<Object> {
+        self.inner.crossed_at(address)
+    }
+
+    /// Tells the host's error sink.
+    pub(crate) fn report(&self, kind: FailureKind, text: String) {
+        match &self.inner.link {
+            Link::Local(state) => state.report(kind, text, None),
+            Link::Seam(seam) => seam.report(kind, &text),
         }
     }
 
@@ -167,5 +197,23 @@ impl ContextInner {
 
     pub(crate) fn is_detached(&self) -> bool {
         self.detached.load(Ordering::Acquire)
+    }
+
+    /// Keeps an object a context across the seam handed the host by its address.
+    pub(crate) fn keep_crossed(&self, object: Object) {
+        self.crossed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(object);
+    }
+
+    /// The object this context handed across the seam at `address`, if it handed one.
+    pub(crate) fn crossed_at(&self, address: usize) -> Option<Object> {
+        self.crossed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|object| address_of(object) == address)
+            .cloned()
     }
 }

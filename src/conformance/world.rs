@@ -177,6 +177,7 @@ impl DriverWorld {
                         deadline.map_or(Json::Null, |at| Json::Number(at as f64)),
                     ]));
                 })),
+                description_check: None,
             },
         )
         .map_err(|answer| format!("the driver's host could not be created: {answer}"))?;
@@ -206,15 +207,19 @@ impl DriverWorld {
     }
 
     /// Opens registered plugins through the host's activation, each entry's activate left in flight, the plan drawn
-    /// from services, which a vector that opens plugins this way declares only where every plugin can be placed.
-    pub(crate) fn open_in_flight(&self, names: &[String]) -> Result<(), DriverFailure> {
+    /// from `edge_source`, which a vector that opens plugins this way declares only where every plugin can be placed.
+    pub(crate) fn open_in_flight(
+        &self,
+        names: &[String],
+        edge_source: EdgeSource,
+    ) -> Result<(), DriverFailure> {
         let handles = names
             .iter()
             .map(|name| self.plugin(name))
             .collect::<Result<Vec<_>, _>>()?;
         let activation = self
             .host
-            .activate(&handles, EdgeSource::SERVICES)
+            .activate(&handles, edge_source)
             .map_err(|answer| format!("the host did not open {names:?}: {answer}"))?;
         if handles
             .iter()

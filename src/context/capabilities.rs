@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
+use super::link::Link;
 use super::plugin::Context;
-use super::records::{CapabilityWatcher, Object, Record, Table};
+use super::records::{CapabilityWatcher, Object, Record, Table, address_of};
 use super::services::Watching;
+use super::state::ContextState;
 use crate::core::{Answer, CapabilityImplementation, FailureKind, Handle};
 use crate::handles::{HandleKind, Reservation};
 
@@ -30,17 +32,18 @@ impl Listing {
         })
     }
 
-    fn hold(&mut self, context: &Context, plugin: Handle, listed: Vec<CapabilityImplementation>) {
+    fn hold(
+        &mut self,
+        state: &ContextState,
+        plugin: Handle,
+        listed: Vec<CapabilityImplementation>,
+    ) {
         if listed.len() > self.rooms.len() {
             self.short_of = listed.len();
             return;
         }
         for each in listed {
-            let Some(object) = context
-                .inner
-                .state
-                .object_of_implementation(each.implementation)
-            else {
+            let Some(object) = state.object_of_implementation(each.implementation) else {
                 self.unknown += 1;
                 continue;
             };
@@ -58,7 +61,14 @@ impl Context {
     /// Provides `implementation` of the capability `id`; it reaches consumers once the plugin's activation is
     /// verified.
     pub fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer> {
-        let state = &self.inner.state;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => {
+                seam.provide(id, address_of(&implementation))?;
+                self.inner.keep_crossed(implementation);
+                return Ok(());
+            }
+        };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         state.call(&self.inner, |hold| {
@@ -78,14 +88,17 @@ impl Context {
     /// The verified implementations of the capability `id`, each the provider's own object, in the core's order. An
     /// implementation the crate holds no object for is left out and the error sink told.
     pub fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer> {
-        let state = &self.inner.state;
+        let state = self
+            .inner
+            .link
+            .local("listing a capability's implementations")?;
         let plugin = self.plugin();
         let mut room = FIRST_LISTING_ROOM;
         loop {
             let mut listing = Listing::with_room(&state.handles, room)?;
             state.call(&self.inner, |hold| {
                 let listed = hold.all_capabilities(plugin, id)?;
-                listing.hold(self, plugin, listed);
+                listing.hold(state, plugin, listed);
                 Ok(())
             })?;
             if listing.short_of > 0 {
@@ -110,7 +123,7 @@ impl Context {
         id: &str,
         watcher: Arc<dyn CapabilityWatcher>,
     ) -> Result<Watching, Answer> {
-        let state = &self.inner.state;
+        let state = self.inner.link.local("a capability watch")?;
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let watch = state.call(&self.inner, |hold| {

@@ -9,8 +9,9 @@ rustup, CMake 3.15 or later and a C compiler are the prerequisites and nothing e
 `repo.json` pins the core, the standard and the conformance kit by commit, and the build reads them from
 `siblings/core`, `siblings/standard` and `siblings/conformance`: CI checks them out there, and locally each is a link
 to, or a clone of, a checkout at the pinned commit. `scripts/native` is a binary crate of the workspace that builds the
-core's shared library, its `echo` test library and its `layouts` program, and the standard's shared library and its
-`layouts` program, with CMake in Release, and gathers them into `build/native`, where the tests find them. A test
+core's shared library, its `echo` test library and its `layouts` program, and the standard's shared library, its
+`described` test library and its `layouts` program, with CMake in Release, then builds the test plugins under
+`tests/plugins` with Cargo, and gathers all of them into `build/native`, where the tests find them. A test
 that finds one missing says to run `scripts/native` first. The layer suite reads the kit's vectors from `siblings/conformance/vectors/layer`.
 
 ## Where Cargo builds

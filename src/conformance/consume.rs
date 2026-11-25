@@ -8,7 +8,7 @@ use super::observations::{Observer, kit_refusal};
 use super::shapes::{self, DriverFailure, Members};
 use super::world::{DriverWorld, InFlight, manifest};
 use crate::context::{CapabilityWatcher, Object, PluginEvent};
-use crate::core::{Answer, LedgerRow, PluginStatus, Refusal};
+use crate::core::{Answer, EdgeSource, LedgerRow, PluginStatus, Refusal};
 use crate::standard::Json;
 
 const WATCH: &str = "watch";
@@ -104,7 +104,7 @@ impl ConsumeRun {
             )?;
             names.push(id);
         }
-        world.open_in_flight(&names)?;
+        world.open_in_flight(&names, EdgeSource::SERVICES)?;
         for name in names {
             let reported = self.reported.clone();
             let listener_name = name.clone();

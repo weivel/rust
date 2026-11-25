@@ -48,6 +48,8 @@ pub enum FailureKind {
     CapacityUnanswered,
     /// A plugin's deactivate panicked or failed, and its release went on.
     PluginDeactivate,
+    /// A C library's binary could not be closed.
+    LibraryUnload,
 }
 
 /// One failure in code the wrapper called, which never reaches the caller of the call that set it off.
@@ -178,6 +180,31 @@ struct FollowingTurn {
     follow: Arc<dyn Fn(Option<i64>) + Send + Sync>,
     deadline: Option<i64>,
     serial: u64,
+}
+
+thread_local! {
+    static DISPATCHES_HERE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Marks this thread as dispatching for as long as it lives.
+struct DispatchingHere;
+
+impl DispatchingHere {
+    fn enter() -> DispatchingHere {
+        DISPATCHES_HERE.with(|depth| depth.set(depth.get() + 1));
+        DispatchingHere
+    }
+}
+
+impl Drop for DispatchingHere {
+    fn drop(&mut self) {
+        DISPATCHES_HERE.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Whether this thread is dispatching a core's queue now, or running a step as its dispatcher.
+pub(crate) fn this_thread_dispatches() -> bool {
+    DISPATCHES_HERE.with(|depth| depth.get() > 0)
 }
 
 pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
@@ -402,6 +429,7 @@ impl Core {
             }
             state.dispatching = true;
         }
+        let _dispatching = DispatchingHere::enter();
         if let Err(payload) = catch_unwind(AssertUnwindSafe(step)) {
             self.report(&failure(
                 FailureKind::Step,
@@ -563,6 +591,7 @@ impl Core {
 
     /// Delivers the queue until it is empty or reaches a fence. Only the thread that claimed the dispatch is here.
     fn dispatch(&self) {
+        let _dispatching = DispatchingHere::enter();
         while let Some(queued) = self.take_next() {
             match queued {
                 Queued::Step(step) => self.run_step(step),

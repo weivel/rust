@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use crate::vectors::{SAT, SAT_WITH_ITS_OWN_TEST, vectors};
 
-const DIRECTORIES_SAT: &[&str] = &["consume/", "lifecycle/", "want/"];
+const DIRECTORIES_SAT: &[&str] = &["consume/", "library/", "lifecycle/", "want/"];
 
 #[test]
 fn every_vector_of_the_directories_sat_has_a_test_and_no_test_names_another() {
@@ -24,5 +24,5 @@ fn every_vector_of_the_directories_sat_has_a_test_and_no_test_names_another() {
         .map(|id| (*id).to_owned())
         .collect();
     assert_eq!(tested, in_the_kit);
-    assert_eq!(tested.len(), 12);
+    assert_eq!(tested.len(), 26);
 }

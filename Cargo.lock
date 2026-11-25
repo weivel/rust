@@ -9,3 +9,10 @@ version = "0.1.0"
 [[package]]
 name = "weivel-rust"
 version = "0.1.0"
+
+[[package]]
+name = "weivel-test-plugins"
+version = "0.1.0"
+dependencies = [
+ "weivel-rust",
+]

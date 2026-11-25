@@ -1,7 +1,6 @@
 //! The host's log, which a plugin writes to under its own name and the core's own log events reach at their level.
 
-use std::sync::Arc;
-
+use super::link::Link;
 use super::state::ContextState;
 use crate::core::{FailureKind, LogLevel};
 
@@ -25,14 +24,14 @@ pub trait HostLog: Send + Sync {
 /// A plugin's log, writing to the host's under the plugin's import name.
 #[derive(Clone)]
 pub struct PluginLog {
-    pub(crate) state: Arc<ContextState>,
+    pub(crate) link: Link,
     pub(crate) name: String,
 }
 
 impl PluginLog {
     /// Writes `text` at `level`.
     pub fn write(&self, level: LogLevel, text: impl Into<String>) {
-        self.state.write(&LogRecord {
+        self.link.write(&LogRecord {
             level,
             plugin: Some(self.name.clone()),
             text: text.into(),

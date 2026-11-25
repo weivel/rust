@@ -109,6 +109,15 @@ impl SystemScheduler {
         })
     }
 
+    /// Whether its thread was joined, which a close made from any other thread does before it returns.
+    #[cfg(test)]
+    pub(crate) fn has_joined(&self) -> bool {
+        self.thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+    }
+
     /// Closes the scheduler: a task not yet begun never runs, and one running finishes on its thread, which this
     /// waits for unless it is that thread.
     pub fn close(&self) {

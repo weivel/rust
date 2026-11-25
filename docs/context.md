@@ -27,4 +27,16 @@ core.
 same hold, `release` and `quarantine` make that call and queue the end of its entries behind the call's own events,
 after which it hears nothing until it is opened again, and `forget` forgets it and detaches its context in the same
 hold. One listener on the core routes every event to the plugin it concerns, by the handle it names, and the core's
-own log events to the host's log. Awaiting releases, which C libraries need, is not here yet.
+own log events to the host's log.
+
+A registration made with `register_awaiting_releases` keeps each holding past its unregistration until the holder
+lets go: the holder hears `PluginEvent::Revoked` whose `Revocation` awaits its release, and hands it to
+`release_holding` once it no longer uses the object, and the owner then hears `PluginEvent::HoldingsReleased`, as it
+hears any event about it: one its own release or quarantine queued still reaches it, one queued after those reaches no
+one. `Contexts` registers the host's own services under `WEIVEL_HOST` through a context of the host's, and a C
+library's definitions awaiting releases, whose last release lets go of the library's binary. A watch takes the room of
+each holding it hears as it hears it, and a watch that cannot is told to the error sink as an unknown object, where a
+want takes its room when it is made.
+
+A context of a plugin across the plugin seam is the same `Context` over the host's context table rather than over the
+core: what the table carries is in [the host doc](host.md), and every other call answers the caller's mistake.

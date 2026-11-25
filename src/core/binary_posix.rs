@@ -30,9 +30,7 @@ pub(super) fn find(handle: *mut c_void, name: &CStr) -> *mut c_void {
     unsafe { dlsym(handle, name.as_ptr()) }
 }
 
-pub(super) fn close(handle: *mut c_void) {
-    // SAFETY: `handle` came from `dlopen` and is closed exactly once, by the library's drop.
-    unsafe {
-        dlclose(handle);
-    }
+pub(super) fn close(handle: *mut c_void) -> bool {
+    // SAFETY: `handle` came from `dlopen` and is closed exactly once.
+    unsafe { dlclose(handle) == 0 }
 }

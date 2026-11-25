@@ -10,6 +10,7 @@ The `core` module: the only place the crate names a function of the core or decl
 - [codes.rs](../../../../src/core/codes.rs) - the core's enumerations, each a newtype over the number that travels, so a value a newer core adds is carried as it came
 - [declarations.rs](../../../../src/core/declarations.rs) - the layout of every hand-declared struct and the name of every function, for the tests that hold them to the core
 - [event.rs](../../../../src/core/event.rs) - an event in the crate's own values, copied from the core's before it is released
+- [library.rs](../../../../src/core/library.rs) - a C library loaded as host services: its binary by path, a bytes call answering the library's bytes in place, a definition and a description answered once
 - [marshal.rs](../../../../src/core/marshal.rs) - laying out a call's inputs as the core's structs in memory that lives until the call returns, refusing a text holding a NUL
 - [mod.rs](../../../../src/core/mod.rs) - the module's public surface
 - [read.rs](../../../../src/core/read.rs) - reading texts, lists and arrays out of the core's memory, stepping a growing array at the stride its first element declares

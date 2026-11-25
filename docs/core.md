@@ -9,6 +9,11 @@ declared by hand, and resolves every function the core exports into one table. A
 library that lacks a function are each answered as a `LoadFailure`, the second naming the first function missing. The
 library is closed when the last core made through it and the last clone of the binary are gone.
 
+The same loader opens a C library the host loads as host services, in `library.rs`: each declared symbol resolved by
+name, a bytes function called with its input lent and its answer read in place as `LibraryBytes`, which release
+themselves through the library's release symbol, and a definition and a description answered once. Every holder of the
+binary holds a reference, so it closes with the last one.
+
 ## The hand declarations
 
 Every struct of the core's header is a `#[repr(C)]` struct written by hand, and every function a field of the table

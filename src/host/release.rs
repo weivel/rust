@@ -5,7 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Weak};
 
 use super::entry::{ActivationState, Finished, Outcome};
-use super::state::{Host, HostShared};
+use super::state::{Host, HostShared, Records};
 use crate::context::{Context, Pending, Settle, pending};
 use crate::core::{Answer, FailureKind, Handle, panic_text};
 
@@ -19,9 +19,10 @@ struct ReleaseStart {
 
 impl Host {
     /// Releases a plugin the host opened, as the contract's release orders it. One whose activate is still running is
-    /// released the same way, its outcome answered released as the release begins. The result settles once the
-    /// release has run: true; false, doing nothing, for a plugin the host has not opened or has forgotten;
-    /// [`Answer::Destroyed`] once the destroy has been called.
+    /// released once that call has returned, and one whose settled activate is being verified once that has ended; a
+    /// release that finds its activate in flight answers its outcome released as the release begins. The result
+    /// settles once the release has run: true; false, doing nothing, for a plugin the host has not opened or has
+    /// forgotten; [`Answer::Destroyed`] once the destroy has been called.
     pub fn release(&self, plugin: Handle) -> Pending<Result<bool, Answer>> {
         if self.shared.is_destroy_called() {
             return Pending::settled(Err(Answer::Destroyed));
@@ -30,14 +31,37 @@ impl Host {
     }
 }
 
+/// Takes what a release that may begin now needs out of the records, the plugin's outcome in flight among it.
+fn take_the_start(
+    records: &mut Records,
+    plugin: Handle,
+) -> Option<(ReleaseStart, Option<Settle<Outcome>>)> {
+    let record = records.plugins.get_mut(&plugin)?;
+    if record.is_busy() {
+        return None;
+    }
+    let settle = record.waiting_release.take()?;
+    let context = record.context.clone()?;
+    let in_flight = record.in_flight.take().and_then(|run| run.settle);
+    let start = ReleaseStart {
+        plugin,
+        context,
+        deactivate: record.activate_called,
+        settle,
+    };
+    records.opened.retain(|opened| *opened != plugin);
+    Some((start, in_flight))
+}
+
 impl HostShared {
-    /// Begins the release of `plugin`, or answers the one under way.
+    /// Asks for the release of `plugin`, or answers the one under way. It begins at once unless the plugin's activate
+    /// is running or settling, and then once neither is.
     pub(super) fn release_record(
         shared: &Arc<HostShared>,
         plugin: Handle,
     ) -> Pending<Result<bool, Answer>> {
         let (released, settle) = pending();
-        let (start, in_flight) = {
+        {
             let mut records = shared.records();
             if !records.opened.contains(&plugin) {
                 return Pending::settled(Ok(false));
@@ -48,19 +72,21 @@ impl HostShared {
             if let Some(under_way) = &record.release {
                 return under_way.clone();
             }
-            let Some(context) = record.context.clone() else {
+            if record.context.is_none() {
                 return Pending::settled(Ok(false));
-            };
+            }
             record.release = Some(released.clone());
-            let in_flight = record.in_flight.take().and_then(|run| run.settle);
-            let start = ReleaseStart {
-                plugin,
-                context,
-                deactivate: record.activate_called,
-                settle,
-            };
-            records.opened.retain(|opened| *opened != plugin);
-            (start, in_flight)
+            record.waiting_release = Some(settle);
+            records.under_way.releases += 1;
+        }
+        HostShared::begin_a_waiting_release(shared, plugin);
+        released
+    }
+
+    /// Begins the release asked for `plugin` when one waits and its activate neither runs nor settles.
+    pub(super) fn begin_a_waiting_release(shared: &Arc<HostShared>, plugin: Handle) {
+        let Some((start, in_flight)) = take_the_start(&mut shared.records(), plugin) else {
+            return;
         };
         if let Some(in_flight) = in_flight {
             in_flight.settle(Outcome {
@@ -70,7 +96,6 @@ impl HostShared {
             });
         }
         HostShared::deactivate_then_release(shared, start);
-        released
     }
 
     fn deactivate_then_release(shared: &Arc<HostShared>, start: ReleaseStart) {
@@ -131,6 +156,9 @@ impl HostShared {
             let _ = shared.contexts.forget(&start.context);
             shared.records().plugins.remove(&start.plugin);
             start.settle.settle(Ok(true));
+            let mut records = shared.records();
+            records.under_way.releases = records.under_way.releases.saturating_sub(1);
+            HostShared::end_the_destroy_when_quiet(&shared, records);
         });
     }
 }

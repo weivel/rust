@@ -9,7 +9,7 @@ use super::observations::{Observer, kit_refusal};
 use super::shapes::{self, DriverFailure, Members};
 use super::world::{DriverWorld, InFlight, manifest};
 use crate::context::{Object, WantLimits};
-use crate::core::{Answer, CoreOptions, RefusalCode};
+use crate::core::{Answer, CoreOptions, EdgeSource, RefusalCode};
 use crate::standard::Json;
 use crate::timer::Scheduler;
 
@@ -95,7 +95,7 @@ pub(crate) fn drive(given: &Members, world: &mut DriverWorld) -> Result<WantRun,
         manifest(PROVIDER, service, &[], &[], &[]),
         Arc::new(InFlight),
     )?;
-    world.open_in_flight(&world.names())?;
+    world.open_in_flight(&world.names(), EdgeSource::SERVICES)?;
     let limits = given
         .timeout
         .map_or_else(WantLimits::unbounded, WantLimits::timeout);

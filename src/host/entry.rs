@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use crate::context::{Context, HostLog, Pending};
-use crate::core::{ActivationPlan, CoreOptions, ErrorSink, Handle, Refusal};
+use crate::core::{
+    ActivationPlan, Answer, CoreOptions, DescribedDefinition, ErrorSink, Handle, Refusal,
+};
 use crate::timer::{Scheduler, TimerObserver};
 
 /// How an activate or a deactivate ended: `Ok`, or why it failed, in English.
@@ -87,4 +89,16 @@ pub struct HostOptions {
     pub sink: Option<Arc<dyn ErrorSink>>,
     /// Hears each move of the host's timer.
     pub timer_observer: Option<TimerObserver>,
+    /// Checks the description a C library's service declares before its definition is registered; a library that
+    /// declares one cannot load on a host given none.
+    pub description_check: Option<Arc<dyn DescriptionCheck>>,
+}
+
+/// Checks a definition's description before the host registers the definition: the standard's
+/// `weivel_standard_description_check`, then its `weivel_standard_description_answers` with the definition, as
+/// [`crate::standard::StandardDescriptions`] runs them. It answers the check's refusal as [`Answer::Mistake`], and
+/// memory running out as the core's own `OUT_OF_MEMORY` refusal.
+pub trait DescriptionCheck: Send + Sync {
+    /// Checks `described`, answering why not when it fails.
+    fn check(&self, described: &DescribedDefinition) -> Result<(), Answer>;
 }
