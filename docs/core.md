@@ -26,7 +26,7 @@ through one wrapper:
 
 - a call is made under one lock and its events are drained under the same hold, each copied into an `Event` of the
   crate's own values and released in the core before the next is drained; an event of a kind the crate does not know
-  is released and never heard;
+  is released and never heard, though it takes its place in the sequence, so the sequences heard may skip one;
 - a call answers its result, or an `Answer`: `Absent`, `Refused` with the refusal the core queued for it, read from the
   call's own drain and never invented, `Destroyed`, `Defect`, which also goes to the error sink, `Mistake`, the
   caller's own error found before anything reached the core, such as a text holding a NUL character, and `Detached`,
@@ -34,15 +34,21 @@ through one wrapper:
   an id or options, is the caller's `Refused` with status `Malformed`; to a call the crate built whole it is a
   `Defect`;
 - events are dispatched to the listeners first in, first out, outside the lock, by one thread at a time; a call made
-  while a dispatch runs, from a listener or from another thread, joins the end of the queue, and `Core::defer` puts a
-  step there;
+  while a dispatch runs, from a listener or from another thread, joins the end of the queue, and a deferred step of
+  the crate's own, which the timer and the host put there, runs in its turn;
 - an event whose texts are not UTF-8 is still heard, marked `incomplete`, every handle, code and number exact and a
   fixed sentence in place of each such text;
 - what a listener, a step or a deadline hook panics with goes to the `ErrorSink` given at creation, which writes a
-  line to standard error when none is given, and a sink that panics is reported to standard error;
-- nothing of the caller's runs under the lock, and what a destroy drops is dropped after the lock is let go, since a
-  dropped closure may itself call in;
-- the wrapper records each deadline announcement as it drains it. `Core::install_deadline_hooks` gives it a clock, read
-  before a call only while a deadline is announced so a due deadline reaches the core first, and a `follow` hook told
-  the latest deadline after the lock is let go, by one thread at a time; no event of a call that drained an
-  announcement is dispatched before `follow` has returned with it.
+  line to standard error when none is given, and a sink that panics is reported to standard error; a write to a
+  closed standard error is dropped rather than panicking, so a dispatch never stops halfway;
+- nothing of the caller's runs under the lock, and nothing of the caller's is dropped under it, since a dropped
+  closure may itself call in: what a destroy, a removal or a deadline turn lets go of is dropped after the lock is;
+- the wrapper records each deadline announcement as it drains it. The deadline hooks give it a clock, read before a
+  call only while a deadline is announced so a due deadline reaches the core first, and a `follow` hook told the
+  latest deadline after the lock is let go, by one thread at a time; no event of a call that drained an announcement
+  is dispatched before `follow` has returned with it.
+
+The deferred steps and the deadline hooks are the crate's own, `pub(crate)`, for the timer and the host to build on:
+the host hands its caller nothing of the wrapper's dispatch, clock or hooks. They are tested by the module's unit tests
+in `src/core/wrapper_tests.rs`, the rest by `tests/core`. `core::declarations` is public only so those tests can hold
+the hand declarations to the core, and is hidden from the crate's documentation.

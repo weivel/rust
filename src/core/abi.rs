@@ -442,11 +442,28 @@ pub(crate) struct LedgerSnapshot {
     pub(crate) storage: *mut c_void,
 }
 
+/// A struct of the core's that begins with its `uint32_t size` and holds only integers and raw pointers, so all zero
+/// bytes is a valid value of it.
+///
+/// # Safety
+/// An implementer is such a struct.
+pub(crate) unsafe trait SizePrefixed: Copy {}
+
+// SAFETY: each is declared above as a `#[repr(C)]` struct of integers and raw pointers whose first field is `size`.
+unsafe impl SizePrefixed for Number {}
+unsafe impl SizePrefixed for Support {}
+unsafe impl SizePrefixed for ActivationPlan {}
+unsafe impl SizePrefixed for ServiceList {}
+unsafe impl SizePrefixed for CapabilityImplementation {}
+unsafe impl SizePrefixed for CapabilityList {}
+unsafe impl SizePrefixed for LedgerRow {}
+unsafe impl SizePrefixed for DeclarationRefusal {}
+unsafe impl SizePrefixed for LedgerSnapshot {}
+
 /// A struct the core fills and frees, zeroed but for its `size`, which the core reads first.
-pub(crate) fn answer_struct<T: Copy>() -> T {
+pub(crate) fn answer_struct<T: SizePrefixed>() -> T {
     let mut value = std::mem::MaybeUninit::<T>::zeroed();
-    // SAFETY: every answer struct here is plain integers and raw pointers, for which all zero bytes is a valid value,
-    // and each begins with its `uint32_t size`.
+    // SAFETY: `T` is size-prefixed, so all zero bytes is a valid value and its first four bytes are its size.
     unsafe {
         value.as_mut_ptr().cast::<u32>().write(size_of::<T>());
         value.assume_init()

@@ -12,6 +12,7 @@ mod answer;
 mod binary;
 mod calls;
 mod codes;
+#[doc(hidden)]
 pub mod declarations;
 mod event;
 mod marshal;
@@ -19,6 +20,8 @@ mod read;
 mod table;
 mod values;
 mod wrapper;
+#[cfg(test)]
+mod wrapper_tests;
 
 pub use answer::{Answer, RefusalStatus};
 pub use codes::{
@@ -33,6 +36,5 @@ pub use values::{
     QuarantineReason, Refusal, ServiceOffer, ServiceWant, Support, WantOptions,
 };
 pub use wrapper::{
-    Core, DeadlineHooks, ErrorSink, Failure, FailureKind, HooksRegistration, Listener,
-    ListenerRegistration, Step, Wrapping,
+    Core, ErrorSink, Failure, FailureKind, Listener, ListenerRegistration, Wrapping,
 };

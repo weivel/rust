@@ -16,4 +16,5 @@ The `core` module: the only place the crate names a function of the core or decl
 - [table.rs](../../../../src/core/table.rs) - every function of the core resolved by name into one table, and `CoreBinary`, which owns the loaded library
 - [values.rs](../../../../src/core/values.rs) - the values the core's calls take and answer, as owned Rust values
 - [wrapper.rs](../../../../src/core/wrapper.rs) - the wrapper: the lock, the drain, the answers, the dispatch queue and deferred steps, the sink and the deadline hooks
+- [wrapper_tests.rs](../../../../src/core/wrapper_tests.rs) - the unit tests of what the wrapper keeps to the crate: deferred steps, destroy, the deadline hooks, and hooks dropped outside the lock
 <!-- end generated -->
