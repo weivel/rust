@@ -7,7 +7,7 @@ use std::ffi::{CString, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use super::abi::{
     ANSWER_FIRST_SHAPE, Answering, ENTRY_FIRST_SHAPE, EVENT_CAPABILITY_PROVIDED,
@@ -24,7 +24,10 @@ use crate::context::{
     Watching, address_of, pending,
 };
 use crate::core::binary::SharedLibrary;
-use crate::core::{Answer, Handle, LogLevel, Number, Refusal, panic_text};
+use crate::core::{
+    Answer, DescribedDefinition, Handle, LibraryBinary, LogLevel, Number, Refusal, panic_text,
+};
+use crate::host::description::BoundDefinition;
 use crate::host::entry::{Entry, Finished};
 use crate::host::state::Host;
 
@@ -285,6 +288,7 @@ struct LentEvent {
     kind: u32,
     token: u64,
     address: usize,
+    description: usize,
     registration: u64,
     awaits_release: bool,
     reach_kind: u32,
@@ -298,6 +302,7 @@ impl LentEvent {
             kind,
             token: 0,
             address: 0,
+            description: 0,
             registration: 0,
             awaits_release: false,
             reach_kind: 0,
@@ -320,6 +325,7 @@ impl LentEvent {
             refusal: lend_refusal(self.refusal.as_ref()),
             settlement: settlement
                 .map_or(std::ptr::null(), |settled| settled as *const SeamAnswered),
+            description: self.description,
         });
     }
 }
@@ -340,6 +346,7 @@ fn forward_events(boxed: &Arc<ContextBox>) -> Listening {
                 }
                 LentEvent {
                     address: address_of(&revocation.object),
+                    description: description_of(&revocation.object),
                     registration: revocation.registration.0,
                     awaits_release: revocation.awaits_release,
                     ..LentEvent::of(EVENT_REVOKED)
@@ -347,6 +354,7 @@ fn forward_events(boxed: &Arc<ContextBox>) -> Listening {
             }
             PluginEvent::HoldingsReleased { id, service } => LentEvent {
                 address: address_of(service),
+                description: description_of(service),
                 id: id.clone(),
                 ..LentEvent::of(EVENT_HOLDINGS_RELEASED)
             },
@@ -362,6 +370,7 @@ fn forward_events(boxed: &Arc<ContextBox>) -> Listening {
                 unmet_constraint,
             } => LentEvent {
                 address: address_of(service),
+                description: description_of(service),
                 id: id.clone(),
                 refusal: Some(unmet_constraint.clone()),
                 ..LentEvent::of(EVENT_DEGRADED)
@@ -383,6 +392,7 @@ impl ForwardingWatcher {
             LentEvent {
                 token: self.token,
                 address: object.map_or(0, address_of),
+                description: object.map_or(0, description_of),
                 ..LentEvent::of(kind)
             }
             .tell(&boxed, None);
@@ -518,6 +528,41 @@ fn answered(
     lend_answered(&outcome, |lent| unsafe { (answer.take)(answer.data, lent) });
 }
 
+/// The description of each definition a library the host loaded registered, by its definition's address, kept while
+/// that library's binary is, so a plugin across the seam binds the very definition an in-process plugin is handed.
+static DESCRIBED: Mutex<BTreeMap<usize, (usize, Weak<LibraryBinary>)>> =
+    Mutex::new(BTreeMap::new());
+
+/// Records the description `described` pairs with its definition, while `binary` stays open.
+pub(crate) fn remember_described(described: &DescribedDefinition, binary: &Arc<LibraryBinary>) {
+    let mut kept = locked(&DESCRIBED);
+    kept.retain(|_, (_, library)| library.strong_count() > 0);
+    kept.insert(
+        described.definition_address(),
+        (described.description_address(), Arc::downgrade(binary)),
+    );
+}
+
+/// The description of `object` when a description bound it, 0 otherwise.
+fn description_of(object: &Object) -> usize {
+    let Some(bound) = object.downcast_ref::<BoundDefinition>() else {
+        return 0;
+    };
+    locked(&DESCRIBED)
+        .get(&bound.address())
+        .filter(|(_, library)| library.strong_count() > 0)
+        .map_or(0, |(description, _)| *description)
+}
+
+/// An object as it crosses: its address, and its description where one bound it.
+fn crossing(object: &Object) -> Result<Answering, Answer> {
+    Ok(Answering {
+        number: address_of(object) as u64,
+        description: description_of(object),
+        ..Answering::default()
+    })
+}
+
 fn done() -> Result<Answering, Answer> {
     Ok(Answering::default())
 }
@@ -572,7 +617,7 @@ unsafe extern "C" fn context_dispatches_here(data: u64) -> u32 {
 unsafe extern "C" fn context_get(data: u64, id: SeamText, answer: *const SeamAnswer) {
     // SAFETY: the id is lent for the call.
     answered(data, answer, |boxed| {
-        number(address_of(&boxed.context.get(&unsafe { text(id) })?) as u64)
+        crossing(&boxed.context.get(&unsafe { text(id) })?)
     });
 }
 
@@ -611,11 +656,7 @@ fn tell_settlement(context: u64, token: u64, settlement: &Result<Object, Answer>
         return;
     };
     locked(&boxed.wants).remove(&token);
-    let answered = settlement.as_ref().map(|object| Answering {
-        number: address_of(object) as u64,
-        ..Answering::default()
-    });
-    let answered = answered.map_err(Clone::clone);
+    let answered = settlement.as_ref().map_err(Clone::clone).and_then(crossing);
     lend_answered(&answered, |lent| {
         LentEvent {
             token,
@@ -769,6 +810,7 @@ unsafe extern "C" fn context_implementations(data: u64, id: SeamText, answer: *c
         let implementations = boxed.context.implementations(&unsafe { text(id) })?;
         Ok(Answering {
             addresses: implementations.iter().map(address_of).collect(),
+            descriptions: implementations.iter().map(description_of).collect(),
             ..Answering::default()
         })
     });

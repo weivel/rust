@@ -7,7 +7,7 @@ use weivel_rust::context::{
     Context, Object, Pending, PluginEvent, ServiceRegistration, WantLimits, address_of,
 };
 use weivel_rust::core::LogLevel;
-use weivel_rust::host::{Entry, Finished};
+use weivel_rust::host::{BoundDefinition, Entry, Finished, Inputs, Value};
 
 /// The typed view both the suite and these plugins compile, so either side can read the other's object.
 #[repr(C)]
@@ -190,9 +190,41 @@ impl Entry for Waiting {
     }
 }
 
+/// Gets the standard's described mirror and reads its enums and calls it, as an in-process plugin does.
+#[derive(Default)]
+pub struct Describing;
+
+impl Entry for Describing {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let mirror = match context.get("described-mirror") {
+            Ok(mirror) => mirror,
+            Err(refused) => return finished(Err(format!("the mirror was not got: {refused}"))),
+        };
+        let shade = context
+            .enums_of(&mirror)
+            .and_then(|enums| enums.number("described_shade", "DESCRIBED_SHADE_DARK"));
+        write(context, format!("shade {shade:?}"));
+        let negated = mirror
+            .downcast_ref::<BoundDefinition>()
+            .map(|bound| {
+                let inputs: Inputs = [("number".to_owned(), Value::I64(5))].into_iter().collect();
+                format!(
+                    "{:?}",
+                    bound
+                        .call("negate", &inputs)
+                        .map(|answer| format!("{answer:?}"))
+                )
+            })
+            .unwrap_or_else(|| "not bound".to_owned());
+        write(context, format!("negated {negated}"));
+        finished(Ok(()))
+    }
+}
+
 weivel_rust::export_entry!(Providing);
 weivel_rust::export_entry!(consuming_entry, Consuming);
 weivel_rust::export_entry!(panicking_entry, Panicking);
 weivel_rust::export_entry!(owning_entry, Owning::default());
 weivel_rust::export_entry!(holding_entry, Holding);
 weivel_rust::export_entry!(waiting_entry, Waiting);
+weivel_rust::export_entry!(describing_entry, Describing);

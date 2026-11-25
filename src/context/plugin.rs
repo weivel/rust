@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use super::enums::DescribedEnums;
 use super::link::{Link, SeamCalls};
 use super::log::PluginLog;
-use super::records::{PluginEvent, PluginListener};
+use super::records::{Object, PluginEvent, PluginListener};
 use super::state::ContextState;
 use crate::core::{Answer, FailureKind, Handle, Manifest};
 use crate::host::BoundDefinition;
@@ -120,8 +120,9 @@ impl Context {
     }
 
     /// The enums of the description that bound `service`, each by the name its header spells, with `weivel_status`
-    /// beside them; none for an object no description bound, as one a plugin registered or a definition across the
-    /// plugin seam. A plugin reads an enum's numbers here rather than copying them from a header.
+    /// beside them; none for an object no description bound, as one a plugin registered. A definition reached across
+    /// the plugin seam is bound on the plugin's side from its description, so it answers the same enums. A plugin reads
+    /// an enum's numbers here rather than copying them from a header.
     pub fn enums_of(&self, service: &Object) -> Option<DescribedEnums> {
         service
             .downcast_ref::<BoundDefinition>()

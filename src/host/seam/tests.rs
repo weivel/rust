@@ -64,6 +64,8 @@ fn an_answer_with_its_lists_crosses_whole() {
         number: 7,
         texts: vec!["a".to_owned(), "b".repeat(900)],
         addresses: vec![1, 2, 3],
+        description: 0,
+        descriptions: Vec::new(),
     }))
     .expect("success crosses as success");
     assert_eq!(answered.number, 7);
@@ -315,6 +317,7 @@ fn an_event_is_ignored_below_its_first_shape_and_heard_longer() {
             id: SeamText::of(&id),
             refusal: super::abi::lend_refusal(None),
             settlement: std::ptr::null(),
+            description: 0,
         };
         // SAFETY: the event lives for the call.
         unsafe { (table.hear)(table.data, &event) };
@@ -376,6 +379,7 @@ fn an_event_reaches_the_context_it_names_of_an_entry_activated_for_two_plugins()
         id: SeamText::of(&id),
         refusal: super::abi::lend_refusal(None),
         settlement: std::ptr::null(),
+        description: 0,
     };
     // SAFETY: the event lives for the call.
     unsafe { (table.hear)(table.data, &event) };

@@ -9,12 +9,12 @@ use std::sync::{Arc, Mutex};
 
 use super::abi::{
     Answering, CAPACITY_FIRST_SHAPE, COMPLETION_FIRST_SHAPE, CONTEXT_FIRST_SHAPE,
-    EVENT_CAPABILITY_PROVIDED, EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_FIRST_SHAPE,
-    EVENT_HOLDINGS_RELEASED, EVENT_REACH_REFUSED, EVENT_REVOKED, EVENT_WANT_SETTLED,
-    EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED, SeamAnswer, SeamAnswered, SeamCapacity,
-    SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamText,
-    SeamWantLimits, carries, failure_kind_code, lend_numbers, read_answered, read_manifest,
-    read_numbers, read_refusal, size_of_table,
+    EVENT_CAPABILITY_PROVIDED, EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_DESCRIPTION_END,
+    EVENT_FIRST_SHAPE, EVENT_HOLDINGS_RELEASED, EVENT_REACH_REFUSED, EVENT_REVOKED,
+    EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED, SeamAnswer, SeamAnswered,
+    SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamManifest, SeamNumber,
+    SeamText, SeamWantLimits, carries, failure_kind_code, lend_numbers, read_answered,
+    read_manifest, read_numbers, read_refusal, size_of_table,
 };
 use super::locked;
 use crate::context::{
@@ -22,6 +22,7 @@ use crate::context::{
     SeamCalls, ServiceWatcher, WantLimits, WantRecord, address_of,
 };
 use crate::core::{Answer, FailureKind, Handle, LogLevel, ReachKind, panic_text};
+use crate::host::description::BoundDefinition;
 use crate::host::entry::{Entry, Finished};
 
 enum Watcher {
@@ -38,6 +39,7 @@ struct Kept {
     wants: HashMap<u64, Arc<WantRecord>>,
     watchers: HashMap<u64, Watcher>,
     answerers: HashMap<u64, Arc<dyn CapacityAnswerer>>,
+    bound: HashMap<(usize, usize), Object>,
 }
 
 impl Kept {
@@ -103,13 +105,34 @@ impl HostTable {
         slot.unwrap_or_else(|| Err(Answer::Defect("the host answered nothing".to_owned())))
     }
 
-    fn object_at(&self, address: usize) -> Object {
-        locked(&self.kept)
+    /// The object at `address` as this side holds it: its own, for one it handed across; the definition its
+    /// description binds, bound once by this side's own binding; otherwise the bare address.
+    fn object_at(&self, address: usize, description: usize) -> Object {
+        let mut kept = locked(&self.kept);
+        if let Some((_, _, object)) = kept
             .objects
             .iter()
             .find(|(_, _, object)| address_of(object) == address)
-            .map(|(_, _, object)| object.clone())
-            .unwrap_or_else(|| Arc::new(ForeignObject::at(address)))
+        {
+            return object.clone();
+        }
+        if description == 0 {
+            return Arc::new(ForeignObject::at(address));
+        }
+        if let Some(bound) = kept.bound.get(&(address, description)) {
+            return bound.clone();
+        }
+        // SAFETY: the host hands a description only beside the definition it bound from it, which the standard's
+        // check passed, while that definition's library is loaded.
+        let bound = unsafe {
+            BoundDefinition::bind(address as *const c_void, description as *const c_void)
+        };
+        let object: Object = match bound {
+            Ok(bound) => Arc::new(bound),
+            Err(_) => Arc::new(ForeignObject::at(address)),
+        };
+        kept.bound.insert((address, description), object.clone());
+        object
     }
 }
 
@@ -134,7 +157,7 @@ impl SeamCalls for HostTable {
         // SAFETY: every argument lives for the call.
         let got = self
             .call(|table, answer| unsafe { (table.get)(table.data, SeamText::of(id), answer) })?;
-        Ok(self.object_at(got.number as usize))
+        Ok(self.object_at(got.number as usize, got.description))
     }
 
     fn ids(&self) -> Result<Vec<String>, Answer> {
@@ -283,10 +306,14 @@ impl SeamCalls for HostTable {
         let listed = self.call(|table, answer| unsafe {
             (table.implementations)(table.data, SeamText::of(id), answer)
         })?;
+        let descriptions = listed.descriptions;
         Ok(listed
             .addresses
             .into_iter()
-            .map(|address| self.object_at(address))
+            .enumerate()
+            .map(|(at, address)| {
+                self.object_at(address, descriptions.get(at).copied().unwrap_or(0))
+            })
             .collect())
     }
 
@@ -524,13 +551,13 @@ unsafe fn heard(host: &HostTable, context: &Context, event: &SeamEvent) {
     let refusal = unsafe { read_refusal(&event.refusal) };
     let told = match event.kind {
         EVENT_REVOKED => PluginEvent::Revoked(Revocation {
-            object: host.object_at(event.address),
+            object: host.object_at(event.address, description_of_event(event)),
             registration: Handle(event.registration),
             awaits_release: event.awaits_release != 0,
         }),
         EVENT_HOLDINGS_RELEASED => PluginEvent::HoldingsReleased {
             id,
-            service: host.object_at(event.address),
+            service: host.object_at(event.address, description_of_event(event)),
         },
         EVENT_REACH_REFUSED => PluginEvent::ReachRefused {
             kind: ReachKind(event.reach_kind),
@@ -539,7 +566,7 @@ unsafe fn heard(host: &HostTable, context: &Context, event: &SeamEvent) {
         },
         EVENT_DEGRADED => PluginEvent::Degraded {
             id,
-            service: host.object_at(event.address),
+            service: host.object_at(event.address, description_of_event(event)),
             unmet_constraint: refusal,
         },
         // SAFETY: as above.
@@ -564,7 +591,7 @@ unsafe fn heard_by_a_token(host: &HostTable, context: &Context, event: &SeamEven
         } else {
             // SAFETY: as the caller promised.
             unsafe { read_answered(&*event.settlement) }
-                .map(|settled| host.object_at(settled.number as usize))
+                .map(|settled| host.object_at(settled.number as usize, settled.description))
         };
         want.settle(settlement);
         return;
@@ -574,7 +601,7 @@ unsafe fn heard_by_a_token(host: &HostTable, context: &Context, event: &SeamEven
         Some(Watcher::Capability(watcher)) => Watcher::Capability(watcher.clone()),
         None => return,
     };
-    let object = host.object_at(event.address);
+    let object = host.object_at(event.address, description_of_event(event));
     let text = "a plugin's watcher panicked";
     let call: Box<dyn FnOnce()> = match (watcher, event.kind) {
         (Watcher::Service(watcher), EVENT_WATCH_REGISTERED) => {
@@ -595,6 +622,15 @@ unsafe fn heard_by_a_token(host: &HostTable, context: &Context, event: &SeamEven
         .inner
         .link
         .call_back(call, FailureKind::PluginCallback, text);
+}
+
+/// The description beside an event's object, where the host's event reaches past it.
+fn description_of_event(event: &SeamEvent) -> usize {
+    if carries(event.size, EVENT_DESCRIPTION_END) {
+        event.description
+    } else {
+        0
+    }
 }
 
 unsafe extern "C" fn plugin_hear(data: *const c_void, event: *const SeamEvent) {

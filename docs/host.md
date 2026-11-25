@@ -71,8 +71,12 @@ of a context crosses, gets, wants and their withdrawal, watches of services and 
 and of implementations, registrations awaiting releases or not and with a capacity answerer or not, unregistrations,
 releases of a holding and capabilities provided, the log and the error sink with every kind of failure, and every
 event about the plugin. A service object crosses as its provider's address, so identity is the address: a consumer in
-the host's binary receives a `ForeignObject`, a plugin across the seam receives the address of the host's own object,
-or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct both sides compile.
+the host's binary receives a `ForeignObject` or a `BoundDefinition`, a plugin across the seam receives the address of
+the host's own object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct
+both sides compile. A described definition crosses with the description its library answered, so the plugin's side
+binds it into a `BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose
+operations it calls as an in-process plugin does; that copy holds nothing of the host's, so a call through it after
+the library's unload is the plugin's defect, as a call through any definition after its holding ended is.
 
 Each table is led by its `size`. A side refuses a table below its first shape, the fields it was first published with,
 reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either

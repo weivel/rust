@@ -336,3 +336,44 @@ fn a_plugin_across_the_seam_waiting_on_the_dispatching_thread_is_quarantined_rat
     );
     host.destroy().wait();
 }
+
+#[test]
+fn a_plugin_across_the_seam_reads_a_bound_definitions_enums_and_calls_it_as_an_in_process_plugin_does()
+ {
+    let _turn = crate::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let check =
+        weivel_rust::standard::StandardDescriptions::load(shared_library("weivel_standard"))
+            .expect("the standard's description checks load");
+    let (host, kept) = kept_host(
+        HostScheduler::NoClock,
+        HostOptions {
+            description_check: Some(Arc::new(check)),
+            ..HostOptions::default()
+        },
+    );
+    let _loaded = host
+        .load_library(
+            &shared_library("weivel_standard_described"),
+            &crate::libraries::described_declaration("described_walker_description"),
+        )
+        .expect("the described library loads");
+    let describing = host
+        .load_entry(&plugins_library(), Some("describing_entry"))
+        .expect("the describing plugin loads");
+    let plugin = host
+        .register(manifest("reader", &[], &["described-mirror"]), describing)
+        .unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    let written = texts_written_by(&kept, "reader");
+    assert_eq!(written[0], "shade Some(2)");
+    assert!(written[1].contains("I64(-5)"), "{written:?}");
+    host.destroy().wait();
+}

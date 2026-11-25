@@ -54,6 +54,10 @@ pub struct SeamAnswered {
     pub(super) text_count: usize,
     pub(super) addresses: *const usize,
     pub(super) address_count: usize,
+    /// Appended: the description of the definition at `number`, and of each of `addresses`, 0 for an object no
+    /// description bound, so the other side binds the same definition from it.
+    pub(super) description: usize,
+    pub(super) descriptions: *const usize,
 }
 
 /// Where the callee hands what it answered: `take` is called once, before the call returns, with `data`.
@@ -192,6 +196,8 @@ pub struct SeamEvent {
     pub(super) id: SeamText,
     pub(super) refusal: SeamRefusal,
     pub(super) settlement: *const SeamAnswered,
+    /// Appended: the description of the definition at `address`, 0 for an object no description bound.
+    pub(super) description: usize,
 }
 
 /// A plugin's entry table, which its library's entry symbol answers. `data` is the plugin's; each function takes it
@@ -238,6 +244,7 @@ pub(super) const ENTRY_FIRST_SHAPE: usize = first_shape!(SeamEntry, free);
 pub(super) const CONTEXT_FIRST_SHAPE: usize = first_shape!(SeamContext, dispatches_here);
 pub(super) const COMPLETION_FIRST_SHAPE: usize = first_shape!(SeamCompletion, finish);
 pub(super) const EVENT_FIRST_SHAPE: usize = first_shape!(SeamEvent, settlement);
+pub(super) const EVENT_DESCRIPTION_END: usize = first_shape!(SeamEvent, description);
 pub(super) const ANSWER_FIRST_SHAPE: usize = first_shape!(SeamAnswer, take);
 pub(super) const ANSWERED_FIRST_SHAPE: usize = first_shape!(SeamAnswered, kind);
 pub(super) const MANIFEST_FIRST_SHAPE: usize = first_shape!(SeamManifest, services_consumed_count);
@@ -381,6 +388,8 @@ pub(super) struct Answering {
     pub(super) number: u64,
     pub(super) texts: Vec<String>,
     pub(super) addresses: Vec<usize>,
+    pub(super) description: usize,
+    pub(super) descriptions: Vec<usize>,
 }
 
 /// Lends `answered` to `take` for the length of the call.
@@ -424,6 +433,12 @@ pub(super) fn lend_answered(
         text_count: texts.len(),
         addresses: value.addresses.as_ptr(),
         address_count: value.addresses.len(),
+        description: value.description,
+        descriptions: if value.descriptions.len() == value.addresses.len() {
+            value.descriptions.as_ptr()
+        } else {
+            std::ptr::null()
+        },
     });
 }
 
@@ -476,6 +491,17 @@ pub(super) unsafe fn read_answered(answered: &SeamAnswered) -> Result<Answering,
             addresses: if reaches(first_shape!(SeamAnswered, address_count)) {
                 // SAFETY: as above.
                 unsafe { lent(answered.addresses, answered.address_count) }.to_vec()
+            } else {
+                Vec::new()
+            },
+            description: if reaches(first_shape!(SeamAnswered, description)) {
+                answered.description
+            } else {
+                0
+            },
+            descriptions: if reaches(first_shape!(SeamAnswered, descriptions)) {
+                // SAFETY: as above; the descriptions run beside the addresses.
+                unsafe { lent(answered.descriptions, answered.address_count) }.to_vec()
             } else {
                 Vec::new()
             },
