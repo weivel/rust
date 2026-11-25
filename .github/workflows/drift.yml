@@ -1,0 +1,17 @@
+name: Drift
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    uses: intisy/workflows/.github/workflows/drift.yml@main
+    with:
+      kit_repository: weivel/conformance
+      kit_ref: 928292ce70eab40ecea19b6d5e6f02b6b09c3a4b
+      role: rust
+      language: rust
+      checks: purity names parity layers
+      runners: '["ubuntu-latest","windows-latest","macos-latest"]'

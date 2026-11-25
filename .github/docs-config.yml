@@ -1,0 +1,2 @@
+kind: generic
+description: The Rust language implementation of weivel, loading the C core its caller names and deciding nothing itself.
