@@ -489,3 +489,36 @@ fn a_call_handed_no_answer_is_not_made_and_crashes_nothing() {
     // SAFETY: every argument lives for the call; the answer is NULL on purpose.
     unsafe { super::host_side::call_get_without_an_answer() };
 }
+
+#[test]
+fn the_methods_a_plugin_offers_are_kept_no_longer_than_the_registration_they_were_said_for() {
+    let plugins = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build")
+        .join("native")
+        .join(format!("{DLL_PREFIX}weivel_test_plugins{DLL_SUFFIX}"));
+    let host = Host::create(
+        &core_binary(),
+        HostOptions {
+            scheduler: HostScheduler::NoClock,
+            ..HostOptions::default()
+        },
+    )
+    .unwrap();
+    let entry = host
+        .load_entry(&plugins, Some("methods_entry"))
+        .expect("the plugin loads");
+    let manifest = Manifest {
+        import_name: "provider".to_owned(),
+        services_provided: vec![crate::core::ServiceOffer {
+            id: "provider:methods".to_owned(),
+            attributes: Vec::new(),
+        }],
+        ..Manifest::default()
+    };
+    let plugin = host.register(manifest, entry.clone()).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    drop(activation.outcomes[0].wait());
+    assert_eq!(entry.actions().call("register", None), Some(Ok(None)));
+    assert_eq!(host.shared.seam.offered_method_count(), 0);
+    host.destroy().wait();
+}

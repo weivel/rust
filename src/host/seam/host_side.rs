@@ -214,6 +214,15 @@ impl SeamRegistry {
     }
 
     /// How many contexts and completions it keeps now: what a test reads to prove each is let go of at its end.
+    /// How many objects' methods the plugins said they offer and no registration or provide has taken yet.
+    #[cfg(test)]
+    pub(super) fn offered_method_count(&self) -> usize {
+        locked(&self.contexts)
+            .values()
+            .map(|boxed| locked(&boxed.offered_methods).len())
+            .sum()
+    }
+
     #[cfg(test)]
     pub(super) fn kept_counts(&self) -> (usize, usize) {
         (
@@ -393,13 +402,15 @@ struct ContextBox {
 }
 
 impl ContextBox {
-    /// The host's object for the plugin's object at `address`: its address, and the methods the plugin said it
-    /// offers, each calling back across the seam.
+    /// The host's object for the plugin's object at `address`: its address, and the methods the plugin said it offers
+    /// just before, each calling back across the seam. What the plugin said is taken here, so it is kept no longer
+    /// than the one registration or provide it was said for.
     fn foreign(&self, address: usize) -> Object {
-        match locked(&self.offered_methods).get(&address) {
+        let offered = locked(&self.offered_methods).remove(&address);
+        match offered {
             Some(names) => Arc::new(ForeignObject::offering(
                 address,
-                methods_across(&self.entry, self.id, address, names.clone()),
+                methods_across(&self.entry, self.id, address, names),
             )),
             None => foreign(address),
         }
