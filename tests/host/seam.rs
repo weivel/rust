@@ -549,3 +549,71 @@ fn the_unload_releases_what_a_plugin_across_the_seam_got_through_the_library_whi
     host.destroy().wait();
     keeping_host.destroy().wait();
 }
+
+/// Watches `provider:methods` and calls its `ping` the moment it is registered, during that registration's own call,
+/// which the provider makes from an action, outside any activation.
+#[derive(Default)]
+struct PingingAtOnce {
+    answered: Arc<Mutex<Vec<String>>>,
+    watching: Mutex<Option<weivel_rust::context::Watching>>,
+}
+
+struct Pinging(Arc<Mutex<Vec<String>>>);
+
+impl weivel_rust::context::ServiceWatcher for Pinging {
+    fn registered(&self, service: &Object) {
+        let answered = weivel_rust::host::methods_of(service)
+            .and_then(|methods| methods.call("ping", None))
+            .map(|ended| format!("{ended:?}"))
+            .unwrap_or_else(|| "no methods".to_owned());
+        self.0.lock().unwrap().push(answered);
+    }
+
+    fn unregistered(&self) {}
+}
+
+impl Entry for PingingAtOnce {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let watching = context.watch("provider:methods", Arc::new(Pinging(self.answered.clone())));
+        *self.watching.lock().unwrap() = watching.ok();
+        Pending::settled(Ok(()))
+    }
+}
+
+#[test]
+fn a_method_called_back_during_its_registrations_own_call_reaches_the_plugins_object() {
+    let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let pinging = Arc::new(PingingAtOnce::default());
+    let consumer = host
+        .register(
+            {
+                let mut optional = manifest("pinger", &[], &["provider:methods"]);
+                optional.services_consumed[0].optional = Some(true);
+                optional
+            },
+            pinging.clone(),
+        )
+        .unwrap();
+    let activation = host.activate(&[consumer], EdgeSource::SERVICES).unwrap();
+    activation.outcomes[0].wait();
+    let providing = host
+        .load_entry(&plugins_library(), Some("methods_entry"))
+        .expect("the providing plugin loads");
+    let provider = host
+        .register(
+            manifest("provider", &["provider:methods"], &[]),
+            providing.clone(),
+        )
+        .unwrap();
+    let activation = host.activate(&[provider], EdgeSource::SERVICES).unwrap();
+    assert_eq!(activation.outcomes[0].wait().state, ActivationState::Active);
+    assert_eq!(providing.actions().call("register", None), Some(Ok(None)));
+    assert_eq!(
+        *pinging.answered.lock().unwrap(),
+        vec![format!(
+            "{:?}",
+            Ok::<_, String>(Some(weivel_rust::host::Tree::Text("pong".to_owned())))
+        )]
+    );
+    host.destroy().wait();
+}

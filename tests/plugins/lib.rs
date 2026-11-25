@@ -389,6 +389,38 @@ weivel_rust::export_entry!(late_entry, LateDeactivating);
 weivel_rust::export_entry!(stashing_entry, Stashing);
 weivel_rust::export_entry!(stash_calling_entry, StashCalling);
 weivel_rust::export_entry!(cursoring_entry, Cursoring::default());
+/// Registers a service offering one method by name, `ping`, answering `pong`, when its action `register` runs, a
+/// call made outside any activation, so the registration's events are dispatched within that call.
+#[derive(Default)]
+pub struct MethodsProviding {
+    context: Arc<Mutex<Option<Context>>>,
+    registration: Arc<Mutex<Option<weivel_rust::context::ServiceRegistration>>>,
+}
+
+impl Entry for MethodsProviding {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        *self.context.lock().unwrap() = Some(context.clone());
+        finished(Ok(()))
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        let context = self.context.clone();
+        let registration = self.registration.clone();
+        weivel_rust::host::Methods::new().with("register", move |_| {
+            let context = context.lock().unwrap().clone().ok_or("not activated")?;
+            let methods = weivel_rust::host::Methods::new().with("ping", |_| {
+                Ok(Some(weivel_rust::host::Tree::Text("pong".to_owned())))
+            });
+            let registered = context
+                .register("provider:methods", Arc::new(methods))
+                .map_err(|refused| refused.to_string())?;
+            *registration.lock().unwrap() = Some(registered);
+            Ok(None)
+        })
+    }
+}
+
+weivel_rust::export_entry!(methods_entry, MethodsProviding::default());
 weivel_rust::export_entry!(host_vector_entry, HostVectorPlugin::default());
 
 mod host_vector;

@@ -39,7 +39,8 @@ enum Watcher {
 #[derive(Default)]
 struct Kept {
     last_token: u64,
-    objects: Vec<(Option<Handle>, Option<u64>, Object)>,
+    /// Each object with its registration once the host answered it, its answerer, and the token it was kept by.
+    objects: Vec<(Option<Handle>, Option<u64>, Object, u64)>,
     wants: HashMap<u64, Arc<WantRecord>>,
     watchers: HashMap<u64, Watcher>,
     answerers: HashMap<u64, Arc<dyn CapacityAnswerer>>,
@@ -141,6 +142,24 @@ impl HostTable {
         .map(|_| ())
     }
 
+    /// Keeps this side's own object before it crosses, so a call back to it during the very call that hands it across,
+    /// as a consumer's during that call's dispatch, finds it; answers the token it is kept by.
+    fn keep(&self, registration: Option<Handle>, answerer: Option<u64>, object: Object) -> u64 {
+        let mut kept = locked(&self.kept);
+        let token = kept.token();
+        kept.objects.push((registration, answerer, object, token));
+        token
+    }
+
+    /// Lets go of an object kept for a call the host refused, and of its answerer.
+    fn let_go(&self, kept_by: u64, answerer: Option<u64>) {
+        let mut kept = locked(&self.kept);
+        kept.objects.retain(|entry| entry.3 != kept_by);
+        if let Some(answerer) = answerer {
+            kept.answerers.remove(&answerer);
+        }
+    }
+
     /// Calls the method `name` of this side's own object at `address`, one it registered or provided.
     fn call_method(
         &self,
@@ -151,8 +170,8 @@ impl HostTable {
         let object = locked(&self.kept)
             .objects
             .iter()
-            .find(|(_, _, object)| address_of(object) == address)
-            .map(|(_, _, object)| object.clone())?;
+            .find(|(_, _, object, _)| address_of(object) == address)
+            .map(|(_, _, object, _)| object.clone())?;
         methods_of(&object)?.call(name, arguments)
     }
 
@@ -162,10 +181,10 @@ impl HostTable {
     /// the bare address.
     fn object_at(&self, crossed: Crossed) -> Object {
         let mut kept = locked(&self.kept);
-        if let Some((_, _, object)) = kept
+        if let Some((_, _, object, _)) = kept
             .objects
             .iter()
-            .find(|(_, _, object)| address_of(object) == crossed.address)
+            .find(|(_, _, object, _)| address_of(object) == crossed.address)
         {
             return object.clone();
         }
@@ -381,10 +400,9 @@ impl SeamCalls for HostTable {
             token
         });
         let address = address_of(&service);
+        let kept_by = self.keep(None, answerer_id, service.clone());
         if let Err(refused) = self.offer_methods_of(&service) {
-            if let Some(answerer_id) = answerer_id {
-                locked(&self.kept).answerers.remove(&answerer_id);
-            }
+            self.let_go(kept_by, answerer_id);
             return Err(refused);
         }
         // SAFETY: as above.
@@ -398,18 +416,17 @@ impl SeamCalls for HostTable {
                 answer,
             )
         });
-        let mut kept = locked(&self.kept);
         match registered {
             Ok(registered) => {
                 let registration = Handle(registered.number);
-                kept.objects
-                    .push((Some(registration), answerer_id, service));
+                let mut kept = locked(&self.kept);
+                if let Some(entry) = kept.objects.iter_mut().find(|entry| entry.3 == kept_by) {
+                    entry.0 = Some(registration);
+                }
                 Ok(registration)
             }
             Err(refused) => {
-                if let Some(answerer_id) = answerer_id {
-                    kept.answerers.remove(&answerer_id);
-                }
+                self.let_go(kept_by, answerer_id);
                 Err(refused)
             }
         }
@@ -424,14 +441,14 @@ impl SeamCalls for HostTable {
         let answerers: Vec<u64> = kept
             .objects
             .iter()
-            .filter(|(kept_registration, _, _)| *kept_registration == Some(registration))
-            .filter_map(|(_, answerer, _)| *answerer)
+            .filter(|(kept_registration, _, _, _)| *kept_registration == Some(registration))
+            .filter_map(|(_, answerer, _, _)| *answerer)
             .collect();
         for answerer in answerers {
             kept.answerers.remove(&answerer);
         }
         kept.objects
-            .retain(|(kept_registration, _, _)| *kept_registration != Some(registration));
+            .retain(|(kept_registration, _, _, _)| *kept_registration != Some(registration));
         Ok(())
     }
 
@@ -448,15 +465,17 @@ impl SeamCalls for HostTable {
 
     fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer> {
         let address = address_of(&implementation);
-        self.offer_methods_of(&implementation)?;
+        let kept_by = self.keep(None, None, implementation.clone());
         // SAFETY: as above.
-        self.call(|table, answer| unsafe {
-            (table.provide)(table.data, SeamText::of(id), address, answer)
-        })?;
-        locked(&self.kept)
-            .objects
-            .push((None, None, implementation));
-        Ok(())
+        let provided = self.offer_methods_of(&implementation).and_then(|()| {
+            self.call(|table, answer| unsafe {
+                (table.provide)(table.data, SeamText::of(id), address, answer)
+            })
+        });
+        if provided.is_err() {
+            self.let_go(kept_by, None);
+        }
+        provided.map(|_| ())
     }
 
     fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer> {
