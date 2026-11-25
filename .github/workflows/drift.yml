@@ -10,7 +10,7 @@ jobs:
     uses: intisy/workflows/.github/workflows/drift.yml@main
     with:
       kit_repository: weivel/conformance
-      kit_ref: 928292ce70eab40ecea19b6d5e6f02b6b09c3a4b
+      kit_ref: 237686027794518fe888f872d33b65c3b66a9626
       role: rust
       language: rust
       checks: purity names parity layers
