@@ -355,6 +355,64 @@ fn count_releases(library: &DescribedLibrary) -> Result<DescribedAnswer, CallSta
         .map_err(|refused| refused.status)
 }
 
+/// The cursors the library's walker has released, a count kept in the binary's own memory, so a binary closed and
+/// mapped again counts from zero.
+fn cursors_released(library: &DescribedLibrary) -> u64 {
+    let Ok(DescribedAnswer::Answered(answers)) = count_releases(library) else {
+        panic!("the mirror answers count_releases");
+    };
+    match answers.value() {
+        Some(Value::Struct(counts)) => match counts.get("cursors") {
+            Some(Value::U64(cursors)) => *cursors,
+            other => panic!("count_releases counted cursors as {other:?}"),
+        },
+        other => panic!("count_releases answered {other:?}"),
+    }
+}
+
+fn open_and_release_a_cursor(library: &DescribedLibrary) {
+    let opened = library
+        .get("described-walker")
+        .expect("the walker is bound")
+        .call(
+            "open",
+            &[("label".to_owned(), Value::Text(Some("walk".to_owned())))]
+                .into_iter()
+                .collect(),
+        );
+    let Ok(DescribedAnswer::Answered(answers)) = opened else {
+        panic!("open answered {opened:?}");
+    };
+    let Some(Value::Handle(cursor)) = answers.value().cloned() else {
+        panic!("open answered no cursor");
+    };
+    drop(answers);
+    cursor.release();
+}
+
+/// Each load maps the binary at the same path, so a count left behind by the first load shows that closing it left
+/// the binary mapped, as a host kept alive would, even while a bound service of it is still held.
+#[test]
+fn closing_a_described_library_closes_its_binary() {
+    let _turn = environment_turn();
+    let folder = described_folder("closes", &pinned_declaration());
+    let first = described_library(&folder.0, &options()).expect("the library binds");
+    open_and_release_a_cursor(&first);
+    assert_eq!(cursors_released(&first), 1);
+    let kept = first
+        .get("described-mirror")
+        .cloned()
+        .expect("the mirror is bound");
+    first.close();
+    let second = described_library(&folder.0, &options()).expect("the library binds again");
+    drop(kept);
+    assert_eq!(
+        cursors_released(&second),
+        0,
+        "the binary was mapped again, its count starting over"
+    );
+}
+
 #[test]
 fn a_described_library_binds_its_described_services_from_its_folder_callable() {
     let _turn = environment_turn();
