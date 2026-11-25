@@ -204,12 +204,8 @@ fn a_context_table_is_refused_below_its_first_shape_and_taken_longer() {
         // SAFETY: every table lives for the call.
         let taken = unsafe { (table.activate)(table.data, &context, &lent.table(), &completion) };
         assert_eq!(taken, 0);
-        assert_eq!(
-            FINISHED.lock().unwrap()[0].0,
-            failed,
-            "{:?}",
-            FINISHED.lock().unwrap()
-        );
+        let finished = FINISHED.lock().unwrap().clone();
+        assert_eq!(finished[0].0, failed, "{finished:?}");
         // SAFETY: as above.
         unsafe { (table.free)(table.data) };
     }

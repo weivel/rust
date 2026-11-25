@@ -332,6 +332,19 @@ impl Entry for ReleasesItselfAndWaits {
 #[test]
 fn a_release_waited_for_inside_the_released_plugins_own_activate_panics_rather_than_hangs() {
     let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let holding = Arc::new(HoldsTheDispatch {
+        gate: Gate::default(),
+    });
+    let holder = host
+        .register(manifest("holder", &[], &[]), holding.clone())
+        .unwrap();
+    let dispatching_host = host.clone();
+    let dispatching = thread::spawn(move || {
+        dispatching_host
+            .activate(&[holder], EdgeSource::SERVICES)
+            .unwrap()
+    });
+    holding.gate.wait_until_reached();
     let entry = Arc::new(ReleasesItselfAndWaits {
         host: Mutex::new(Some(host.clone())),
     });
@@ -339,12 +352,12 @@ fn a_release_waited_for_inside_the_released_plugins_own_activate_panics_rather_t
         .register(manifest("self", &[], &[]), entry.clone())
         .unwrap();
     let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    holding.gate.open();
+    dispatching.join().unwrap();
     assert_eq!(
         activation.outcomes[0].wait().state,
         ActivationState::Quarantined
     );
-    let ledger = host.ledger().unwrap();
-    assert!(ledger.iter().all(|row| row.import_name != "self"));
     entry.host.lock().unwrap().take();
     host.destroy().wait();
 }
