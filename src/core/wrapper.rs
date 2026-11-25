@@ -38,6 +38,16 @@ pub enum FailureKind {
     LayerDefect,
     /// The core did not take the time of a deadline that fell due, which stays due.
     DueAdvance,
+    /// A plugin's listener, watcher or capacity answerer panicked.
+    PluginCallback,
+    /// The host's log panicked.
+    Log,
+    /// The core named a handle the crate holds no object for.
+    ObjectUnknown,
+    /// A capacity question could not be answered to the core.
+    CapacityUnanswered,
+    /// A plugin's deactivate panicked or failed, and its release went on.
+    PluginDeactivate,
 }
 
 /// One failure in code the wrapper called, which never reaches the caller of the call that set it off.
@@ -170,7 +180,7 @@ struct FollowingTurn {
     serial: u64,
 }
 
-fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|text| (*text).to_owned())
@@ -346,41 +356,64 @@ impl Core {
         }
     }
 
-    /// Makes one call of the core through the wrapper: a due deadline handed over first, the call, its drain, and the
-    /// answer read from its status and the refusal it queued.
-    pub(crate) fn invoke(
+    /// Holds the layer lock across `body`, a due deadline handed to the core first, then lets it go as a call does:
+    /// `follow` told, the sink told what the hold met, and the queue dispatched unless a dispatch already runs.
+    pub(crate) fn hold<T>(
         &self,
-        parts: Parts,
-        call: impl FnOnce(&CoreFunctions, *mut c_void, &mut u32) -> i32,
-    ) -> Result<(), Answer> {
+        body: impl FnOnce(&mut Hold<'_>) -> Result<T, Answer>,
+    ) -> Result<T, Answer> {
         let state = self.enter()?;
         let state = self.hand_over_a_due_deadline(state)?;
-        self.invoke_entered(state, parts, call)
+        self.held(state, body)
     }
 
-    /// As [`Core::invoke`], for the one call that hands the core the time itself, so it checks no deadline first.
-    pub(crate) fn invoke_handing_the_time(
+    /// As [`Core::hold`], for the one call that hands the core the time itself, so it checks no deadline first.
+    pub(crate) fn hold_handing_the_time<T>(
         &self,
-        call: impl FnOnce(&CoreFunctions, *mut c_void, &mut u32) -> i32,
-    ) -> Result<(), Answer> {
+        body: impl FnOnce(&mut Hold<'_>) -> Result<T, Answer>,
+    ) -> Result<T, Answer> {
         let state = self.enter()?;
-        self.invoke_entered(state, Parts::CarriesTheCallers, call)
+        self.held(state, body)
     }
 
-    fn invoke_entered(
+    fn held<T>(
         &self,
-        mut state: Guard<'_>,
-        parts: Parts,
-        call: impl FnOnce(&CoreFunctions, *mut c_void, &mut u32) -> i32,
-    ) -> Result<(), Answer> {
-        let pointer = state.core.expect("an entered core is not destroyed").0;
-        let mut notes = Vec::new();
-        let mut waiting = 0u32;
-        let status = call(self.functions(), pointer, &mut waiting);
-        let own_refusal = self.drain(&mut state, waiting, &mut notes);
-        let answer = answer_of(status, parts, own_refusal, &mut notes);
+        state: Guard<'_>,
+        body: impl FnOnce(&mut Hold<'_>) -> Result<T, Answer>,
+    ) -> Result<T, Answer> {
+        let mut hold = Hold {
+            core: self,
+            state,
+            notes: Vec::new(),
+        };
+        let answer = body(&mut hold);
+        let Hold { state, notes, .. } = hold;
         self.leave(state, notes);
         answer
+    }
+
+    /// Runs `step` on this thread as the dispatcher when no dispatch runs, so what its calls queue is dispatched once
+    /// it returns, then dispatches; answers false, running nothing, when a dispatch runs already.
+    pub(crate) fn run_as_the_dispatcher(&self, step: impl FnOnce()) -> bool {
+        {
+            let mut state = self.lock();
+            if state.dispatching {
+                return false;
+            }
+            state.dispatching = true;
+        }
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(step)) {
+            self.report(&failure(
+                FailureKind::Step,
+                format!(
+                    "a step run as the dispatcher panicked: {}",
+                    panic_text(&*payload)
+                ),
+                None,
+            ));
+        }
+        self.dispatch();
+        true
     }
 
     /// Drains a call's events, fencing them all when one is a deadline announcement, and answers the first refusal
@@ -645,7 +678,6 @@ impl Core {
 
     /// Puts a step at the end of the dispatch queue, after every event drained before it, run by the thread that
     /// dispatches.
-    #[allow(dead_code, reason = "the timer and the host modules build on it")]
     pub(crate) fn defer(&self, step: impl FnOnce(&Core) + Send + 'static) -> Result<(), Answer> {
         let mut state = self.enter()?;
         state.queue.push_back(Queued::Step(Box::new(step)));
@@ -655,7 +687,6 @@ impl Core {
 
     /// Installs the deadline hooks, which `follow` hears the latest announcement through at once. A core holds one
     /// set; installing a second is the caller's mistake.
-    #[allow(dead_code, reason = "the timer and the host modules build on it")]
     pub(crate) fn install_deadline_hooks(
         &self,
         hooks: DeadlineHooks,
@@ -678,7 +709,6 @@ impl Core {
     }
 
     /// Removes the deadline hooks `registration` names; answers [`Answer::Absent`] when they are not the ones installed.
-    #[allow(dead_code, reason = "the timer and the host modules build on it")]
     pub(crate) fn remove_deadline_hooks(
         &self,
         registration: HooksRegistration,
@@ -727,6 +757,45 @@ impl Core {
             self.shared.state.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         )
+    }
+}
+
+/// One hold of the layer lock across several calls of the core, each drained as it returns. What a body does between
+/// its calls runs under the lock and before any event drained is dispatched, so an entry it makes for a handle the
+/// core answered is there when a listener hears of it. A body never calls a method of [`Core`], which would take the
+/// lock again, and runs nothing of a caller's.
+pub(crate) struct Hold<'a> {
+    core: &'a Core,
+    state: Guard<'a>,
+    notes: Vec<Failure>,
+}
+
+impl Hold<'_> {
+    pub(crate) fn functions(&self) -> &CoreFunctions {
+        self.core.functions()
+    }
+
+    /// Makes one call of the core and drains it, answering from its status and the refusal it queued.
+    pub(crate) fn invoke(
+        &mut self,
+        parts: Parts,
+        call: impl FnOnce(&CoreFunctions, *mut c_void, &mut u32) -> i32,
+    ) -> Result<(), Answer> {
+        let pointer = self.state.core.ok_or(Answer::Destroyed)?.0;
+        let mut waiting = 0u32;
+        let status = call(self.core.functions(), pointer, &mut waiting);
+        let own_refusal = self.core.drain(&mut self.state, waiting, &mut self.notes);
+        answer_of(status, parts, own_refusal, &mut self.notes)
+    }
+
+    /// Puts a step at the end of the dispatch queue, behind every event this hold drained.
+    pub(crate) fn defer(&mut self, step: Step) {
+        self.state.queue.push_back(Queued::Step(step));
+    }
+
+    /// Tells the sink of `told` once the lock is let go.
+    pub(crate) fn note(&mut self, told: Failure) {
+        self.notes.push(told);
     }
 }
 

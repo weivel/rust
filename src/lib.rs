@@ -4,3 +4,20 @@
 //! `core` crate here, so the crate writes `::core::` for that one, and `std` wherever either would do.
 
 pub mod core;
+
+#[forbid(unsafe_code)]
+pub mod handles;
+
+#[forbid(unsafe_code)]
+pub mod timer;
+
+#[forbid(unsafe_code)]
+pub mod context;
+
+#[forbid(unsafe_code)]
+pub mod host;
+
+pub mod standard;
+
+#[forbid(unsafe_code)]
+pub mod conformance;

@@ -12,7 +12,7 @@ use super::values::{
     ActivationPlan, CapabilityImplementation, Capacity, DeclarationRefusal, Edge, Handle,
     LedgerRow, LedgerSnapshot, Manifest, PluginRefusal, QuarantineReason, Support, WantOptions,
 };
-use super::wrapper::{Core, Failure, FailureKind, Parts};
+use super::wrapper::{Core, Failure, FailureKind, Hold, Parts};
 
 type HandleCall =
     unsafe extern "C" fn(*mut std::ffi::c_void, u64, *const c_char, *mut u64, *mut u32) -> i32;
@@ -20,6 +20,171 @@ type HandleCall =
 impl Core {
     /// The core's earliest deadline, in the caller's milliseconds; [`Answer::Absent`] when nothing waits on time.
     pub fn next_deadline(&self) -> Result<i64, Answer> {
+        self.hold(|hold| hold.next_deadline())
+    }
+
+    /// Hands the core the caller's time now, so it acts on every deadline that has fallen due.
+    pub fn advance(&self, now: i64) -> Result<(), Answer> {
+        self.hold_handing_the_time(|hold| hold.advance(now))
+    }
+
+    /// Whether the core supports `manifest`, and if not, on which axis and why.
+    pub fn supports(&self, manifest: &Manifest) -> Result<Support, Answer> {
+        self.hold(|hold| hold.supports(manifest))
+    }
+
+    /// Registers a plugin's manifest, answering the plugin's handle.
+    pub fn register_manifest(&self, manifest: &Manifest) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.register_manifest(manifest))
+    }
+
+    /// Plans the activation of registered plugins: each provider before its consumers, cycles and refusals as data.
+    /// `host_provided` names the services the host itself provides, `None` for none.
+    pub fn plan_activation(
+        &self,
+        plugins: &[Handle],
+        edge_source: EdgeSource,
+        host_provided: Option<&[String]>,
+    ) -> Result<ActivationPlan, Answer> {
+        self.hold(|hold| hold.plan_activation(plugins, edge_source, host_provided))
+    }
+
+    /// Opens a registered plugin, giving the core the caller's own token for it.
+    pub fn open_plugin(&self, plugin: Handle, payload: u64) -> Result<(), Answer> {
+        self.hold(|hold| hold.open_plugin(plugin, payload))
+    }
+
+    /// The token the caller gave when it opened the plugin.
+    pub fn plugin_payload(&self, plugin: Handle) -> Result<u64, Answer> {
+        self.hold(|hold| hold.plugin_payload(plugin))
+    }
+
+    /// Releases an open plugin.
+    pub fn release_plugin(&self, plugin: Handle) -> Result<(), Answer> {
+        self.hold(|hold| hold.release_plugin(plugin))
+    }
+
+    /// Quarantines a plugin, with why when the host knows it.
+    pub fn quarantine_plugin(
+        &self,
+        plugin: Handle,
+        reason: Option<&QuarantineReason>,
+    ) -> Result<(), Answer> {
+        self.hold(|hold| hold.quarantine_plugin(plugin, reason))
+    }
+
+    /// Forgets a released or quarantined plugin.
+    pub fn forget_plugin(&self, plugin: Handle) -> Result<(), Answer> {
+        self.hold(|hold| hold.forget_plugin(plugin))
+    }
+
+    /// Registers a service `owner` provides under `id`, answering the registration.
+    pub fn register_service(&self, owner: Handle, id: &str) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.register_service(owner, id))
+    }
+
+    /// Registers a service under `id` that waits for every holding of an earlier registration to be released.
+    pub fn register_service_awaiting_releases(
+        &self,
+        owner: Handle,
+        id: &str,
+    ) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.register_service_awaiting_releases(owner, id))
+    }
+
+    /// Releases what `holder` holds of `registration`.
+    pub fn release_holding(&self, holder: Handle, registration: Handle) -> Result<(), Answer> {
+        self.hold(|hold| hold.release_holding(holder, registration))
+    }
+
+    /// Unregisters a registration, a want or a watch.
+    pub fn unregister(&self, handle: Handle) -> Result<(), Answer> {
+        self.hold(|hold| hold.unregister(handle))
+    }
+
+    /// The condition of whatever `handle` names.
+    pub fn handle_state(&self, handle: Handle) -> Result<HandleCondition, Answer> {
+        self.hold(|hold| hold.handle_state(handle))
+    }
+
+    /// The service registered under `id` that `plugin` may reach; [`Answer::Absent`] when none is.
+    pub fn get_service(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.get_service(plugin, id))
+    }
+
+    /// Wants the service `id` for `plugin`, answering the want, which settles exactly once by an event.
+    pub fn want_service(
+        &self,
+        plugin: Handle,
+        id: &str,
+        options: &WantOptions,
+    ) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.want_service(plugin, id, options))
+    }
+
+    /// Answers a capacity question the core put to `registration` for `want`.
+    pub fn report_capacity(
+        &self,
+        want: Handle,
+        registration: Handle,
+        capacity: &Capacity,
+        now: i64,
+    ) -> Result<(), Answer> {
+        self.hold(|hold| hold.report_capacity(want, registration, capacity, now))
+    }
+
+    /// Watches the service `id` for `plugin`, answering the watch.
+    pub fn watch_service(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.watch_service(plugin, id))
+    }
+
+    /// Every service id `plugin` may reach.
+    pub fn service_ids(&self, plugin: Handle) -> Result<Vec<String>, Answer> {
+        self.hold(|hold| hold.service_ids(plugin))
+    }
+
+    /// Every service `plugin` declares that nothing provides yet.
+    pub fn unbound_services(&self, plugin: Handle) -> Result<Vec<String>, Answer> {
+        self.hold(|hold| hold.unbound_services(plugin))
+    }
+
+    /// Provides the capability `id` from `plugin`, answering the implementation.
+    pub fn provide_capability(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.provide_capability(plugin, id))
+    }
+
+    /// Verifies that an open plugin did what its manifest declares.
+    pub fn verify_activation(&self, plugin: Handle) -> Result<(), Answer> {
+        self.hold(|hold| hold.verify_activation(plugin))
+    }
+
+    /// Every verified implementation of the capability `id` that `plugin` may reach.
+    pub fn all_capabilities(
+        &self,
+        plugin: Handle,
+        id: &str,
+    ) -> Result<Vec<CapabilityImplementation>, Answer> {
+        self.hold(|hold| hold.all_capabilities(plugin, id))
+    }
+
+    /// Watches the capability `id` for `plugin`, answering the watch.
+    pub fn watch_capability(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+        self.hold(|hold| hold.watch_capability(plugin, id))
+    }
+
+    /// The whole of the core's ledger.
+    pub fn ledger(&self) -> Result<LedgerSnapshot, Answer> {
+        self.hold(|hold| hold.ledger())
+    }
+
+    /// One plugin's row of the core's ledger.
+    pub fn ledger_entry(&self, plugin: Handle) -> Result<LedgerRow, Answer> {
+        self.hold(|hold| hold.ledger_entry(plugin))
+    }
+}
+
+impl Hold<'_> {
+    pub(crate) fn next_deadline(&mut self) -> Result<i64, Answer> {
         let mut deadline = 0i64;
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live and every out pointer is the crate's own.
@@ -28,16 +193,14 @@ impl Core {
         Ok(deadline)
     }
 
-    /// Hands the core the caller's time now, so it acts on every deadline that has fallen due.
-    pub fn advance(&self, now: i64) -> Result<(), Answer> {
-        self.invoke_handing_the_time(|functions, core, pending| {
+    pub(crate) fn advance(&mut self, now: i64) -> Result<(), Answer> {
+        self.invoke(Parts::CarriesTheCallers, |functions, core, pending| {
             // SAFETY: `core` is live.
             unsafe { (functions.weivel_advance)(core, now, pending) }
         })
     }
 
-    /// Whether the core supports `manifest`, and if not, on which axis and why.
-    pub fn supports(&self, manifest: &Manifest) -> Result<Support, Answer> {
+    pub(crate) fn supports(&mut self, manifest: &Manifest) -> Result<Support, Answer> {
         let mut arena = Arena::default();
         let manifest = arena.manifest(manifest)?;
         let mut answer = abi::answer_struct::<abi::Support>();
@@ -59,8 +222,7 @@ impl Core {
         Ok(support)
     }
 
-    /// Registers a plugin's manifest, answering the plugin's handle.
-    pub fn register_manifest(&self, manifest: &Manifest) -> Result<Handle, Answer> {
+    pub(crate) fn register_manifest(&mut self, manifest: &Manifest) -> Result<Handle, Answer> {
         let mut arena = Arena::default();
         let manifest = arena.manifest(manifest)?;
         let mut plugin = 0u64;
@@ -71,10 +233,8 @@ impl Core {
         Ok(Handle(plugin))
     }
 
-    /// Plans the activation of registered plugins: each provider before its consumers, cycles and refusals as data.
-    /// `host_provided` names the services the host itself provides, `None` for none.
-    pub fn plan_activation(
-        &self,
+    pub(crate) fn plan_activation(
+        &mut self,
         plugins: &[Handle],
         edge_source: EdgeSource,
         host_provided: Option<&[String]>,
@@ -111,8 +271,7 @@ impl Core {
         Ok(plan)
     }
 
-    /// Opens a registered plugin, giving the core the caller's own token for it.
-    pub fn open_plugin(&self, plugin: Handle, payload: u64) -> Result<(), Answer> {
+    pub(crate) fn open_plugin(&mut self, plugin: Handle, payload: u64) -> Result<(), Answer> {
         let options = abi::PluginOptions {
             size: abi::size_of::<abi::PluginOptions>(),
             payload,
@@ -123,8 +282,7 @@ impl Core {
         })
     }
 
-    /// The token the caller gave when it opened the plugin.
-    pub fn plugin_payload(&self, plugin: Handle) -> Result<u64, Answer> {
+    pub(crate) fn plugin_payload(&mut self, plugin: Handle) -> Result<u64, Answer> {
         let mut payload = 0u64;
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live and the out pointer is the crate's own.
@@ -133,17 +291,15 @@ impl Core {
         Ok(payload)
     }
 
-    /// Releases an open plugin.
-    pub fn release_plugin(&self, plugin: Handle) -> Result<(), Answer> {
+    pub(crate) fn release_plugin(&mut self, plugin: Handle) -> Result<(), Answer> {
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live.
             unsafe { (functions.weivel_release_plugin)(core, plugin.0, pending) }
         })
     }
 
-    /// Quarantines a plugin, with why when the host knows it.
-    pub fn quarantine_plugin(
-        &self,
+    pub(crate) fn quarantine_plugin(
+        &mut self,
         plugin: Handle,
         reason: Option<&QuarantineReason>,
     ) -> Result<(), Answer> {
@@ -167,22 +323,19 @@ impl Core {
         })
     }
 
-    /// Forgets a released or quarantined plugin.
-    pub fn forget_plugin(&self, plugin: Handle) -> Result<(), Answer> {
+    pub(crate) fn forget_plugin(&mut self, plugin: Handle) -> Result<(), Answer> {
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live.
             unsafe { (functions.weivel_forget_plugin)(core, plugin.0, pending) }
         })
     }
 
-    /// Registers a service `owner` provides under `id`, answering the registration.
-    pub fn register_service(&self, owner: Handle, id: &str) -> Result<Handle, Answer> {
+    pub(crate) fn register_service(&mut self, owner: Handle, id: &str) -> Result<Handle, Answer> {
         self.handle_call(owner, id, |functions| functions.weivel_register_service)
     }
 
-    /// Registers a service under `id` that waits for every holding of an earlier registration to be released.
-    pub fn register_service_awaiting_releases(
-        &self,
+    pub(crate) fn register_service_awaiting_releases(
+        &mut self,
         owner: Handle,
         id: &str,
     ) -> Result<Handle, Answer> {
@@ -191,24 +344,25 @@ impl Core {
         })
     }
 
-    /// Releases what `holder` holds of `registration`.
-    pub fn release_holding(&self, holder: Handle, registration: Handle) -> Result<(), Answer> {
+    pub(crate) fn release_holding(
+        &mut self,
+        holder: Handle,
+        registration: Handle,
+    ) -> Result<(), Answer> {
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live.
             unsafe { (functions.weivel_release_holding)(core, holder.0, registration.0, pending) }
         })
     }
 
-    /// Unregisters a registration, a want or a watch.
-    pub fn unregister(&self, handle: Handle) -> Result<(), Answer> {
+    pub(crate) fn unregister(&mut self, handle: Handle) -> Result<(), Answer> {
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live.
             unsafe { (functions.weivel_unregister)(core, handle.0, pending) }
         })
     }
 
-    /// The condition of whatever `handle` names.
-    pub fn handle_state(&self, handle: Handle) -> Result<HandleCondition, Answer> {
+    pub(crate) fn handle_state(&mut self, handle: Handle) -> Result<HandleCondition, Answer> {
         let mut condition = 0u32;
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live and the out pointer is the crate's own.
@@ -217,14 +371,12 @@ impl Core {
         Ok(HandleCondition(condition))
     }
 
-    /// The service registered under `id` that `plugin` may reach; [`Answer::Absent`] when none is.
-    pub fn get_service(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+    pub(crate) fn get_service(&mut self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
         self.handle_call(plugin, id, |functions| functions.weivel_get_service)
     }
 
-    /// Wants the service `id` for `plugin`, answering the want, which settles exactly once by an event.
-    pub fn want_service(
-        &self,
+    pub(crate) fn want_service(
+        &mut self,
         plugin: Handle,
         id: &str,
         options: &WantOptions,
@@ -256,9 +408,8 @@ impl Core {
         Ok(Handle(want))
     }
 
-    /// Answers a capacity question the core put to `registration` for `want`.
-    pub fn report_capacity(
-        &self,
+    pub(crate) fn report_capacity(
+        &mut self,
         want: Handle,
         registration: Handle,
         capacity: &Capacity,
@@ -286,37 +437,35 @@ impl Core {
         })
     }
 
-    /// Watches the service `id` for `plugin`, answering the watch.
-    pub fn watch_service(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+    pub(crate) fn watch_service(&mut self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
         self.handle_call(plugin, id, |functions| functions.weivel_watch_service)
     }
 
-    /// Every service id `plugin` may reach.
-    pub fn service_ids(&self, plugin: Handle) -> Result<Vec<String>, Answer> {
+    pub(crate) fn service_ids(&mut self, plugin: Handle) -> Result<Vec<String>, Answer> {
         self.service_list(plugin, false)
     }
 
-    /// Every service `plugin` declares that nothing provides yet.
-    pub fn unbound_services(&self, plugin: Handle) -> Result<Vec<String>, Answer> {
+    pub(crate) fn unbound_services(&mut self, plugin: Handle) -> Result<Vec<String>, Answer> {
         self.service_list(plugin, true)
     }
 
-    /// Provides the capability `id` from `plugin`, answering the implementation.
-    pub fn provide_capability(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+    pub(crate) fn provide_capability(
+        &mut self,
+        plugin: Handle,
+        id: &str,
+    ) -> Result<Handle, Answer> {
         self.handle_call(plugin, id, |functions| functions.weivel_provide_capability)
     }
 
-    /// Verifies that an open plugin did what its manifest declares.
-    pub fn verify_activation(&self, plugin: Handle) -> Result<(), Answer> {
+    pub(crate) fn verify_activation(&mut self, plugin: Handle) -> Result<(), Answer> {
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live.
             unsafe { (functions.weivel_verify_activation)(core, plugin.0, pending) }
         })
     }
 
-    /// Every verified implementation of the capability `id` that `plugin` may reach.
-    pub fn all_capabilities(
-        &self,
+    pub(crate) fn all_capabilities(
+        &mut self,
         plugin: Handle,
         id: &str,
     ) -> Result<Vec<CapabilityImplementation>, Answer> {
@@ -350,13 +499,11 @@ impl Core {
             .collect())
     }
 
-    /// Watches the capability `id` for `plugin`, answering the watch.
-    pub fn watch_capability(&self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
+    pub(crate) fn watch_capability(&mut self, plugin: Handle, id: &str) -> Result<Handle, Answer> {
         self.handle_call(plugin, id, |functions| functions.weivel_watch_capability)
     }
 
-    /// The whole of the core's ledger.
-    pub fn ledger(&self) -> Result<LedgerSnapshot, Answer> {
+    pub(crate) fn ledger(&mut self) -> Result<LedgerSnapshot, Answer> {
         let mut answer = abi::answer_struct::<abi::LedgerSnapshot>();
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live and the snapshot is the crate's own.
@@ -371,8 +518,7 @@ impl Core {
         Ok(snapshot)
     }
 
-    /// One plugin's row of the core's ledger.
-    pub fn ledger_entry(&self, plugin: Handle) -> Result<LedgerRow, Answer> {
+    pub(crate) fn ledger_entry(&mut self, plugin: Handle) -> Result<LedgerRow, Answer> {
         let mut answer = abi::answer_struct::<abi::LedgerRow>();
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             // SAFETY: `core` is live and the row is the crate's own.
@@ -388,7 +534,7 @@ impl Core {
     }
 
     fn handle_call(
-        &self,
+        &mut self,
         plugin: Handle,
         id: &str,
         function: impl FnOnce(&super::table::CoreFunctions) -> HandleCall,
@@ -402,7 +548,7 @@ impl Core {
         Ok(Handle(answered))
     }
 
-    fn service_list(&self, plugin: Handle, unbound: bool) -> Result<Vec<String>, Answer> {
+    fn service_list(&mut self, plugin: Handle, unbound: bool) -> Result<Vec<String>, Answer> {
         let mut answer = abi::answer_struct::<abi::ServiceList>();
         self.invoke(Parts::BuiltByTheLayer, |functions, core, pending| {
             let function = if unbound {
@@ -422,10 +568,9 @@ impl Core {
         Ok(ids)
     }
 
-    /// Tells the sink when the core refused to release an answer the crate read, which only a defect explains.
-    fn released(&self, function: &str, status: i32) {
+    fn released(&mut self, function: &str, status: i32) {
         if status != abi::STATUS_OK {
-            self.report(&Failure {
+            self.note(Failure {
                 kind: FailureKind::LayerDefect,
                 text: format!("the core refused {function} for an answer the layer read"),
                 sequence: None,
