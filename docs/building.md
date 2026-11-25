@@ -1,7 +1,8 @@
 # Building and testing
 
 `cargo run -p native` builds the native siblings the tests load, and `cargo test --workspace` then builds the crate and
-runs every test. `rust-toolchain.toml` pins one exact toolchain, which rustup acquires on the first `cargo` call, so
+runs every test, the benchmark gates briefly and judging no timing; `cargo test --release --test benchmarks` judges them,
+as [benchmarks.md](benchmarks.md) says. `rust-toolchain.toml` pins one exact toolchain, which rustup acquires on the first `cargo` call, so
 rustup, CMake 3.15 or later and a C compiler are the prerequisites and nothing else is installed by hand.
 
 ## The siblings

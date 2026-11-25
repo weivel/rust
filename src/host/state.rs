@@ -165,6 +165,11 @@ impl Host {
         })
     }
 
+    /// The core the host made, for a call a benchmark compares against the same call made past the layer.
+    pub(crate) fn core(&self) -> &Core {
+        &self.shared.core
+    }
+
     /// Registers a plugin from its manifest value and its entry, answering its handle or the core's refusal.
     pub fn register(&self, manifest: Manifest, entry: Arc<dyn Entry>) -> Result<Handle, Answer> {
         if self.shared.is_destroy_called() {
