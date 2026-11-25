@@ -216,6 +216,31 @@ impl BoundDefinition {
             .map_err(Answer::Mistake)
     }
 
+    /// Binds a definition the host across the plugin seam bound from the same description, its binary held mapped
+    /// through `mapping` across each call and release, and everything got through it among `holdings`, which the
+    /// host's unload of that library releases while the binary is still mapped.
+    ///
+    /// # Safety
+    /// `definition` and `description` are what the host's library answered, which the standard's check passed, and
+    /// the binary is mapped for the length of this call.
+    pub(crate) unsafe fn bind_remote(
+        definition: usize,
+        description: usize,
+        mapping: Mapping,
+        holdings: Arc<Holdings>,
+    ) -> Result<BoundDefinition, Answer> {
+        // SAFETY: as the caller promised.
+        let read = unsafe { reader::read(description) };
+        let environment = Environment {
+            mapping,
+            holdings,
+            scope: None,
+        };
+        read.and_then(Binding::new)
+            .and_then(|binding| binding.bind(definition, environment))
+            .map_err(Answer::Mistake)
+    }
+
     /// The struct its definition is, as its description names it.
     pub fn name(&self) -> &str {
         &self.inner.binding.description.definition

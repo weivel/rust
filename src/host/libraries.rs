@@ -294,7 +294,7 @@ impl Host {
             };
             let described = binary.described(symbol, address)?;
             check.check(&described)?;
-            super::seam::remember_described(&described, binary);
+            self.shared.seam.remember_described(&described, binary);
             let mapping = Mapping::Library(Arc::downgrade(binary));
             let bound =
                 bind_described(&described, mapping, holdings.clone()).map_err(Answer::Mistake)?;
@@ -413,6 +413,9 @@ impl HostShared {
         let Some(registrations) = library.take_for_unloading() else {
             return false;
         };
+        if let Some(binary) = library.inner.lifetime.binary() {
+            self.seam.library_unloading(&binary);
+        }
         library.inner.holdings.release_all();
         library.inner.lifetime.close_to_calls();
         let ids = library
@@ -454,6 +457,9 @@ impl HostShared {
         let libraries = std::mem::take(&mut self.records().libraries);
         for library in libraries {
             if library.take_for_unloading().is_some() {
+                if let Some(binary) = library.inner.lifetime.binary() {
+                    self.seam.library_unloading(&binary);
+                }
                 library.inner.holdings.release_all();
                 library.inner.lifetime.close_to_calls();
             }

@@ -16,17 +16,36 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The binary a bound definition's functions lie in, or none for a definition its caller bound with no library
-/// behind it, which its caller keeps mapped.
+/// A binary another copy of the crate holds mapped: the host's, for a definition a plugin across the plugin seam bound
+/// on its own side.
+pub(crate) trait RemoteMapping: Send + Sync {
+    /// Holds the binary mapped until the matching [`RemoteMapping::unhold`], answering false once it has closed.
+    fn hold(&self) -> bool;
+    fn unhold(&self);
+}
+
+/// The binary a bound definition's functions lie in: a library this copy of the crate loaded, one the host across the
+/// plugin seam loaded, or none for a definition its caller bound with no library behind it, which its caller keeps
+/// mapped.
 #[derive(Clone)]
 pub(crate) enum Mapping {
     Library(Weak<LibraryBinary>),
+    Remote(Arc<dyn RemoteMapping>),
     Unowned,
 }
 
 /// Keeps the binary mapped while it lives.
 pub(crate) struct MappingHold {
     _binary: Option<Arc<LibraryBinary>>,
+    remote: Option<Arc<dyn RemoteMapping>>,
+}
+
+impl Drop for MappingHold {
+    fn drop(&mut self) {
+        if let Some(remote) = self.remote.take() {
+            remote.unhold();
+        }
+    }
 }
 
 impl Mapping {
@@ -35,8 +54,16 @@ impl Mapping {
         match self {
             Mapping::Library(binary) => binary.upgrade().map(|binary| MappingHold {
                 _binary: Some(binary),
+                remote: None,
             }),
-            Mapping::Unowned => Some(MappingHold { _binary: None }),
+            Mapping::Remote(remote) => remote.hold().then(|| MappingHold {
+                _binary: None,
+                remote: Some(remote.clone()),
+            }),
+            Mapping::Unowned => Some(MappingHold {
+                _binary: None,
+                remote: None,
+            }),
         }
     }
 }

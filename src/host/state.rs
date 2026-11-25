@@ -104,6 +104,8 @@ pub(super) struct HostShared {
     pub(super) system_scheduler: Mutex<Option<Arc<SystemScheduler>>>,
     pub(super) description_check: Option<Arc<dyn super::DescriptionCheck>>,
     pub(super) records: Mutex<Records>,
+    /// What the host keeps of the plugin seam, dropped with the host.
+    pub(super) seam: Arc<super::seam::SeamRegistry>,
 }
 
 /// Registers plugins written in Rust, activates, verifies and releases them, offers host services, loads C libraries
@@ -155,6 +157,7 @@ impl Host {
                 system_scheduler: Mutex::new(system),
                 description_check: options.description_check.clone(),
                 records: Mutex::new(Records::default()),
+                seam: Arc::default(),
             }),
         })
     }

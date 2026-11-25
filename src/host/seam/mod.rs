@@ -21,7 +21,7 @@ pub use abi::{
     SeamWantLimits,
 };
 pub use host_side::DEFAULT_ENTRY_SYMBOL;
-pub(crate) use host_side::remember_described;
+pub(crate) use host_side::SeamRegistry;
 pub use plugin_side::seam_entry;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

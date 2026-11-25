@@ -8,13 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::abi::{
-    Answering, CAPACITY_FIRST_SHAPE, COMPLETION_FIRST_SHAPE, CONTEXT_FIRST_SHAPE,
+    Answering, CAPACITY_FIRST_SHAPE, COMPLETION_FIRST_SHAPE, CONTEXT_FIRST_SHAPE, CONTEXT_HOLD_END,
     EVENT_CAPABILITY_PROVIDED, EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_DESCRIPTION_END,
-    EVENT_FIRST_SHAPE, EVENT_HOLDINGS_RELEASED, EVENT_REACH_REFUSED, EVENT_REVOKED,
-    EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED, SeamAnswer, SeamAnswered,
-    SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamManifest, SeamNumber,
-    SeamText, SeamWantLimits, carries, failure_kind_code, lend_numbers, read_answered,
-    read_manifest, read_numbers, read_refusal, size_of_table,
+    EVENT_FIRST_SHAPE, EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING, EVENT_MAPPING_END,
+    EVENT_REACH_REFUSED, EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED,
+    EVENT_WATCH_UNREGISTERED, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext,
+    SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamText, SeamWantLimits, carries,
+    failure_kind_code, lend_numbers, read_answered, read_manifest, read_numbers, read_refusal,
+    size_of_table,
 };
 use super::locked;
 use crate::context::{
@@ -22,7 +23,7 @@ use crate::context::{
     SeamCalls, ServiceWatcher, WantLimits, WantRecord, address_of,
 };
 use crate::core::{Answer, FailureKind, Handle, LogLevel, ReachKind, panic_text};
-use crate::host::description::BoundDefinition;
+use crate::host::description::{BoundDefinition, Holdings, Mapping, RemoteMapping};
 use crate::host::entry::{Entry, Finished};
 
 enum Watcher {
@@ -39,7 +40,8 @@ struct Kept {
     wants: HashMap<u64, Arc<WantRecord>>,
     watchers: HashMap<u64, Watcher>,
     answerers: HashMap<u64, Arc<dyn CapacityAnswerer>>,
-    bound: HashMap<(usize, usize), Object>,
+    bound: HashMap<(usize, u64), Object>,
+    holdings: HashMap<u64, Arc<Holdings>>,
 }
 
 impl Kept {
@@ -52,7 +54,7 @@ impl Kept {
 /// The host's context table, copied, as the plugin's side calls it; closed once the host let go of it.
 pub(super) struct HostTable {
     table: SeamContext,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     kept: Mutex<Kept>,
 }
 
@@ -73,7 +75,7 @@ impl HostTable {
     pub(super) fn of(table: SeamContext) -> HostTable {
         HostTable {
             table,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             kept: Mutex::new(Kept::default()),
         }
     }
@@ -106,33 +108,128 @@ impl HostTable {
     }
 
     /// The object at `address` as this side holds it: its own, for one it handed across; the definition its
-    /// description binds, bound once by this side's own binding; otherwise the bare address.
-    fn object_at(&self, address: usize, description: usize) -> Object {
+    /// description binds, bound once by this side's own binding over the host's mapping of its library, so a call or a
+    /// release through it holds the binary mapped through the host and answers unloaded once it has closed; otherwise
+    /// the bare address.
+    fn object_at(&self, crossed: Crossed) -> Object {
         let mut kept = locked(&self.kept);
         if let Some((_, _, object)) = kept
             .objects
             .iter()
-            .find(|(_, _, object)| address_of(object) == address)
+            .find(|(_, _, object)| address_of(object) == crossed.address)
         {
             return object.clone();
         }
-        if description == 0 {
-            return Arc::new(ForeignObject::at(address));
+        let bare = || -> Object { Arc::new(ForeignObject::at(crossed.address)) };
+        if crossed.description == 0
+            || crossed.mapping == 0
+            || !carries(self.table.size, CONTEXT_HOLD_END)
+        {
+            return bare();
         }
-        if let Some(bound) = kept.bound.get(&(address, description)) {
+        if let Some(bound) = kept.bound.get(&(crossed.address, crossed.mapping)) {
             return bound.clone();
         }
-        // SAFETY: the host hands a description only beside the definition it bound from it, which the standard's
-        // check passed, while that definition's library is loaded.
-        let bound = unsafe {
-            BoundDefinition::bind(address as *const c_void, description as *const c_void)
+        let mapping = Arc::new(HostMapping {
+            table: self.table,
+            closed: self.closed.clone(),
+            mapping: crossed.mapping,
+        });
+        let Some(mapped) = Mapping::Remote(mapping.clone()).hold() else {
+            return bare();
         };
+        let holdings = kept
+            .holdings
+            .entry(crossed.mapping)
+            .or_insert_with(Holdings::of_a_library)
+            .clone();
+        // SAFETY: the host hands a description only beside the definition it bound from it, both answered by a library
+        // the standard's check passed, and `mapped` holds that library mapped across the binding.
+        let bound = unsafe {
+            BoundDefinition::bind_remote(
+                crossed.address,
+                crossed.description,
+                Mapping::Remote(mapping),
+                holdings,
+            )
+        };
+        drop(mapped);
         let object: Object = match bound {
             Ok(bound) => Arc::new(bound),
-            Err(_) => Arc::new(ForeignObject::at(address)),
+            Err(_) => bare(),
         };
-        kept.bound.insert((address, description), object.clone());
+        kept.bound
+            .insert((crossed.address, crossed.mapping), object.clone());
         object
+    }
+
+    /// Releases everything this side's bindings got from the library `mapping` names, while the host still holds it
+    /// mapped, as the host's unload does for its own.
+    fn library_unloading(&self, mapping: u64) {
+        let holdings = {
+            let mut kept = locked(&self.kept);
+            kept.bound.retain(|(_, of), _| *of != mapping);
+            kept.holdings.remove(&mapping)
+        };
+        if let Some(holdings) = holdings {
+            holdings.release_all();
+        }
+    }
+}
+
+/// An object as the host handed it across.
+#[derive(Clone, Copy)]
+struct Crossed {
+    address: usize,
+    description: usize,
+    mapping: u64,
+}
+
+impl Crossed {
+    fn answered(answered: &Answering) -> Crossed {
+        Crossed {
+            address: answered.number as usize,
+            description: answered.description,
+            mapping: answered.mapping,
+        }
+    }
+
+    fn of_event(event: &SeamEvent) -> Crossed {
+        let reaches = |end: usize| carries(event.size, end);
+        Crossed {
+            address: event.address,
+            description: if reaches(EVENT_DESCRIPTION_END) {
+                event.description
+            } else {
+                0
+            },
+            mapping: if reaches(EVENT_MAPPING_END) {
+                event.mapping
+            } else {
+                0
+            },
+        }
+    }
+}
+
+/// The host's mapping of one library, held through its context table for each call or release a binding on this
+/// side makes; nothing once the host let go of the table.
+struct HostMapping {
+    table: SeamContext,
+    closed: Arc<AtomicBool>,
+    mapping: u64,
+}
+
+impl RemoteMapping for HostMapping {
+    fn hold(&self) -> bool {
+        // SAFETY: the call takes nothing but ids; the host answers 0 for a table or library it let go of.
+        !self.closed.load(Ordering::Acquire)
+            && unsafe { (self.table.hold)(self.table.data, self.mapping) } != 0
+    }
+
+    fn unhold(&self) {
+        // SAFETY: as above.
+        unsafe { (self.table.unhold)(self.table.data, self.mapping) };
     }
 }
 
@@ -157,7 +254,7 @@ impl SeamCalls for HostTable {
         // SAFETY: every argument lives for the call.
         let got = self
             .call(|table, answer| unsafe { (table.get)(table.data, SeamText::of(id), answer) })?;
-        Ok(self.object_at(got.number as usize, got.description))
+        Ok(self.object_at(Crossed::answered(&got)))
     }
 
     fn ids(&self) -> Result<Vec<String>, Answer> {
@@ -307,12 +404,17 @@ impl SeamCalls for HostTable {
             (table.implementations)(table.data, SeamText::of(id), answer)
         })?;
         let descriptions = listed.descriptions;
+        let mappings = listed.mappings;
         Ok(listed
             .addresses
             .into_iter()
             .enumerate()
             .map(|(at, address)| {
-                self.object_at(address, descriptions.get(at).copied().unwrap_or(0))
+                self.object_at(Crossed {
+                    address,
+                    description: descriptions.get(at).copied().unwrap_or(0),
+                    mapping: mappings.get(at).copied().unwrap_or(0),
+                })
             })
             .collect())
     }
@@ -545,19 +647,22 @@ unsafe extern "C" fn plugin_deactivate(
 /// # Safety
 /// The event is lent for the length of the call.
 unsafe fn heard(host: &HostTable, context: &Context, event: &SeamEvent) {
+    if event.kind == EVENT_LIBRARY_UNLOADING {
+        return host.library_unloading(Crossed::of_event(event).mapping);
+    }
     // SAFETY: as the caller promised.
     let id = unsafe { event.id.read() };
     // SAFETY: as above.
     let refusal = unsafe { read_refusal(&event.refusal) };
     let told = match event.kind {
         EVENT_REVOKED => PluginEvent::Revoked(Revocation {
-            object: host.object_at(event.address, description_of_event(event)),
+            object: host.object_at(Crossed::of_event(event)),
             registration: Handle(event.registration),
             awaits_release: event.awaits_release != 0,
         }),
         EVENT_HOLDINGS_RELEASED => PluginEvent::HoldingsReleased {
             id,
-            service: host.object_at(event.address, description_of_event(event)),
+            service: host.object_at(Crossed::of_event(event)),
         },
         EVENT_REACH_REFUSED => PluginEvent::ReachRefused {
             kind: ReachKind(event.reach_kind),
@@ -566,7 +671,7 @@ unsafe fn heard(host: &HostTable, context: &Context, event: &SeamEvent) {
         },
         EVENT_DEGRADED => PluginEvent::Degraded {
             id,
-            service: host.object_at(event.address, description_of_event(event)),
+            service: host.object_at(Crossed::of_event(event)),
             unmet_constraint: refusal,
         },
         // SAFETY: as above.
@@ -591,7 +696,7 @@ unsafe fn heard_by_a_token(host: &HostTable, context: &Context, event: &SeamEven
         } else {
             // SAFETY: as the caller promised.
             unsafe { read_answered(&*event.settlement) }
-                .map(|settled| host.object_at(settled.number as usize, settled.description))
+                .map(|settled| host.object_at(Crossed::answered(&settled)))
         };
         want.settle(settlement);
         return;
@@ -601,7 +706,7 @@ unsafe fn heard_by_a_token(host: &HostTable, context: &Context, event: &SeamEven
         Some(Watcher::Capability(watcher)) => Watcher::Capability(watcher.clone()),
         None => return,
     };
-    let object = host.object_at(event.address, description_of_event(event));
+    let object = host.object_at(Crossed::of_event(event));
     let text = "a plugin's watcher panicked";
     let call: Box<dyn FnOnce()> = match (watcher, event.kind) {
         (Watcher::Service(watcher), EVENT_WATCH_REGISTERED) => {
@@ -622,15 +727,6 @@ unsafe fn heard_by_a_token(host: &HostTable, context: &Context, event: &SeamEven
         .inner
         .link
         .call_back(call, FailureKind::PluginCallback, text);
-}
-
-/// The description beside an event's object, where the host's event reaches past it.
-fn description_of_event(event: &SeamEvent) -> usize {
-    if carries(event.size, EVENT_DESCRIPTION_END) {
-        event.description
-    } else {
-        0
-    }
 }
 
 unsafe extern "C" fn plugin_hear(data: *const c_void, event: *const SeamEvent) {

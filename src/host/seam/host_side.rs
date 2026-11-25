@@ -1,21 +1,24 @@
 //! The seam's host side: a plugin's library opened by path, its entry table taken from the symbol its caller names,
-//! and the host's context table each of its activates is handed, every call through which finds its context by an id
-//! in the host's own registry.
+//! and the host's context table each of its activates is handed. What the host keeps of the seam lives in the host's
+//! own [`SeamRegistry`]; a context or a completion crosses as an id that resolves to it only while the host keeps it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use super::abi::{
     ANSWER_FIRST_SHAPE, Answering, ENTRY_FIRST_SHAPE, EVENT_CAPABILITY_PROVIDED,
-    EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_HOLDINGS_RELEASED, EVENT_REACH_REFUSED,
-    EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED,
-    LentManifest, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext, SeamEntry,
-    SeamEvent, SeamNumber, SeamText, SeamWantLimits, WANT_LIMITS_FIRST_SHAPE, carries,
-    failure_kind_of, lend_answered, lend_numbers, lend_refusal, read_numbers, size_of_table,
+    EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING,
+    EVENT_REACH_REFUSED, EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED,
+    EVENT_WATCH_UNREGISTERED, LentManifest, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion,
+    SeamContext, SeamEntry, SeamEvent, SeamNumber, SeamText, SeamWantLimits,
+    WANT_LIMITS_FIRST_SHAPE, carries, failure_kind_of, lend_answered, lend_numbers, lend_refusal,
+    read_numbers, size_of_table,
 };
 use super::locked;
 use crate::context::{
@@ -38,17 +41,194 @@ const QUESTION_ATTRIBUTES: u32 = 1;
 const QUESTION_SERVE: u32 = 2;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static CONTEXTS: Mutex<BTreeMap<u64, Arc<ContextBox>>> = Mutex::new(BTreeMap::new());
-static COMPLETIONS: Mutex<BTreeMap<u64, CompletionRecord>> = Mutex::new(BTreeMap::new());
+
+/// Every context and completion id any host handed across, resolving only while that host keeps what it names.
+static CONTEXT_IDS: Mutex<BTreeMap<u64, Weak<ContextBox>>> = Mutex::new(BTreeMap::new());
+static COMPLETION_IDS: Mutex<BTreeMap<u64, Weak<CompletionRecord>>> = Mutex::new(BTreeMap::new());
+
+/// How many calls a plugin made into a host's side of the seam are running now, which a plugin's library is never
+/// closed under, since each returns into that library's code.
+static CALLS_FROM_PLUGINS: AtomicUsize = AtomicUsize::new(0);
 
 fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Counts one call a plugin made into the host's side while it runs.
+struct CallFromAPlugin;
+
+impl CallFromAPlugin {
+    fn enter() -> CallFromAPlugin {
+        CALLS_FROM_PLUGINS.fetch_add(1, Ordering::AcqRel);
+        CallFromAPlugin
+    }
+}
+
+impl Drop for CallFromAPlugin {
+    fn drop(&mut self) {
+        CALLS_FROM_PLUGINS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// An activate or deactivate in flight, kept until it is finished or its context is forgotten.
 struct CompletionRecord {
-    settle: Settle<Finished>,
+    id: u64,
+    settle: Mutex<Option<Settle<Finished>>>,
     context: u64,
+    registry: Weak<SeamRegistry>,
+}
+
+/// A library the host loaded whose described definitions crossed the seam, held mapped for each call a plugin makes
+/// through its own binding of one.
+struct MappingRecord {
+    binary: Weak<LibraryBinary>,
+    holds: Vec<Arc<LibraryBinary>>,
+}
+
+/// What one host keeps of the seam: each plugin's context box, each completion in flight, and each described
+/// definition with the library it lies in. Dropped with the host, which ends every id that names any of it.
+#[derive(Default)]
+pub(crate) struct SeamRegistry {
+    contexts: Mutex<BTreeMap<u64, Arc<ContextBox>>>,
+    completions: Mutex<BTreeMap<u64, Arc<CompletionRecord>>>,
+    described: Mutex<BTreeMap<usize, (usize, u64)>>,
+    mappings: Mutex<BTreeMap<u64, MappingRecord>>,
+}
+
+impl SeamRegistry {
+    /// Records the description `described` pairs with its definition, in `binary`, so a plugin across the seam binds
+    /// the very definition an in-process plugin is handed.
+    pub(crate) fn remember_described(
+        &self,
+        described: &DescribedDefinition,
+        binary: &Arc<LibraryBinary>,
+    ) {
+        let mapping = {
+            let mut mappings = locked(&self.mappings);
+            mappings.retain(|_, record| record.binary.strong_count() > 0);
+            let known = mappings
+                .iter()
+                .find(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
+                .map(|(id, _)| *id);
+            known.unwrap_or_else(|| {
+                let id = next_id();
+                mappings.insert(
+                    id,
+                    MappingRecord {
+                        binary: Arc::downgrade(binary),
+                        holds: Vec::new(),
+                    },
+                );
+                id
+            })
+        };
+        let mut kept = locked(&self.described);
+        kept.retain(|_, (_, known)| locked(&self.mappings).contains_key(known));
+        kept.insert(
+            described.definition_address(),
+            (described.description_address(), mapping),
+        );
+    }
+
+    /// The description of `object` and the id of the library it lies in, when a description bound it; zeros otherwise.
+    fn description_of(&self, object: &Object) -> (usize, u64) {
+        let Some(bound) = object.downcast_ref::<BoundDefinition>() else {
+            return (0, 0);
+        };
+        locked(&self.described)
+            .get(&bound.address())
+            .copied()
+            .unwrap_or((0, 0))
+    }
+
+    fn hold(&self, mapping: u64) -> bool {
+        let mut mappings = locked(&self.mappings);
+        let Some(record) = mappings.get_mut(&mapping) else {
+            return false;
+        };
+        let Some(binary) = record.binary.upgrade() else {
+            return false;
+        };
+        record.holds.push(binary);
+        true
+    }
+
+    fn unhold(&self, mapping: u64) {
+        let released = locked(&self.mappings)
+            .get_mut(&mapping)
+            .and_then(|record| record.holds.pop());
+        drop(released);
+    }
+
+    /// Tells every plugin across the seam that `binary` is about to close to calls, while it is still mapped, so each
+    /// releases what its own bindings of the library's definitions got.
+    pub(crate) fn library_unloading(&self, binary: &Arc<LibraryBinary>) {
+        let mapping = locked(&self.mappings)
+            .iter()
+            .find(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
+            .map(|(id, _)| *id);
+        let Some(mapping) = mapping else {
+            return;
+        };
+        let boxes: Vec<Arc<ContextBox>> = locked(&self.contexts).values().cloned().collect();
+        for boxed in boxes {
+            LentEvent {
+                mapping,
+                ..LentEvent::of(EVENT_LIBRARY_UNLOADING)
+            }
+            .tell(&boxed, None);
+        }
+    }
+
+    fn completion(self: &Arc<Self>, settle: Settle<Finished>, context: u64) -> SeamCompletion {
+        let id = next_id();
+        let record = Arc::new(CompletionRecord {
+            id,
+            settle: Mutex::new(Some(settle)),
+            context,
+            registry: Arc::downgrade(self),
+        });
+        locked(&COMPLETION_IDS).insert(id, Arc::downgrade(&record));
+        locked(&self.completions).insert(id, record);
+        SeamCompletion {
+            size: size_of_table::<SeamCompletion>(),
+            data: id,
+            finish: finish_completion,
+        }
+    }
+
+    fn forget_completion(&self, id: u64) {
+        locked(&COMPLETION_IDS).remove(&id);
+        let forgotten = locked(&self.completions).remove(&id);
+        drop(forgotten);
+    }
+
+    /// How many contexts and completions it keeps now: what a test reads to prove each is let go of at its end.
+    #[cfg(test)]
+    pub(super) fn kept_counts(&self) -> (usize, usize) {
+        (
+            locked(&self.contexts).len(),
+            locked(&self.completions).len(),
+        )
+    }
+}
+
+/// Settles a completion once: the record is taken out under its lock, and settled outside every lock of the seam's.
+fn settle_completion(id: u64, finished: Finished) {
+    let record = locked(&COMPLETION_IDS)
+        .remove(&id)
+        .and_then(|record| record.upgrade());
+    let Some(record) = record else {
+        return;
+    };
+    let settle = locked(&record.settle).take();
+    if let Some(registry) = record.registry.upgrade() {
+        let removed = locked(&registry.completions).remove(&record.id);
+        drop(removed);
+    }
+    if let Some(settle) = settle {
+        settle.settle(finished);
+    }
 }
 
 /// A plugin's library, open while any entry loaded from it is.
@@ -59,7 +239,7 @@ pub(crate) struct PluginLibrary {
 /// A plugin's entry table, copied by value, told `free` once nothing of the host calls it any more.
 struct EntryHandle {
     table: SeamEntry,
-    _library: Arc<PluginLibrary>,
+    library: Option<Arc<PluginLibrary>>,
 }
 
 // SAFETY: the table's `data` is the plugin's, whose every function may be called from any thread, as the seam's
@@ -68,10 +248,52 @@ unsafe impl Send for EntryHandle {}
 // SAFETY: as above.
 unsafe impl Sync for EntryHandle {}
 
+/// An entry the host let go of, freed and its library dropped on the seam's own thread once no call a plugin made
+/// into the host is running, so neither runs inside a call that will return into the library's code.
+struct Retired {
+    table: SeamEntry,
+    library: Option<Arc<PluginLibrary>>,
+}
+
+// SAFETY: as for `EntryHandle`.
+unsafe impl Send for Retired {}
+
+fn retire(retired: Retired) {
+    static RETIRING: OnceLock<Mutex<Sender<Retired>>> = OnceLock::new();
+    let sender = RETIRING.get_or_init(|| {
+        let (sender, receiving) = channel::<Retired>();
+        let started = std::thread::Builder::new()
+            .name("weivel-seam-retire".to_owned())
+            .spawn(move || {
+                for retired in receiving {
+                    free_once_no_plugin_calls_in(retired);
+                }
+            });
+        if started.is_err() {
+            eprintln!("weivel: the seam's retiring thread could not be started, so retired entries stay loaded");
+        }
+        Mutex::new(sender)
+    });
+    if let Err(unsent) = locked(sender).send(retired) {
+        std::mem::forget(unsent.0);
+    }
+}
+
+fn free_once_no_plugin_calls_in(retired: Retired) {
+    while CALLS_FROM_PLUGINS.load(Ordering::Acquire) > 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // SAFETY: nothing of the host holds the entry any more, so nothing calls the table after this.
+    let _ = catch_unwind(|| unsafe { (retired.table.free)(retired.table.data) });
+    drop(retired.library);
+}
+
 impl Drop for EntryHandle {
     fn drop(&mut self) {
-        // SAFETY: nothing of the host holds the handle any more, so nothing calls the table after this.
-        let _ = catch_unwind(|| unsafe { (self.table.free)(self.table.data) });
+        retire(Retired {
+            table: self.table,
+            library: self.library.take(),
+        });
     }
 }
 
@@ -87,16 +309,26 @@ struct ContextBox {
     id: u64,
     context: Context,
     entry: Arc<EntryHandle>,
+    registry: Weak<SeamRegistry>,
     registrations: Mutex<HashMap<u64, ServiceRegistration>>,
     wants: Mutex<HashMap<u64, Want>>,
-    watches: Mutex<HashMap<u64, Watching>>,
+    watches: Mutex<HashMap<u64, Option<Watching>>>,
     revocations: Mutex<HashMap<u64, Revocation>>,
     forwarding: Mutex<Option<Listening>>,
+}
+
+impl ContextBox {
+    fn description_of(&self, object: &Object) -> (usize, u64) {
+        self.registry
+            .upgrade()
+            .map_or((0, 0), |registry| registry.description_of(object))
+    }
 }
 
 /// A plugin's entry across the seam, as the host's [`Entry`].
 struct SeamEntryOf {
     entry: Arc<EntryHandle>,
+    registry: Weak<SeamRegistry>,
     contexts: Mutex<HashMap<Handle, u64>>,
 }
 
@@ -104,10 +336,11 @@ impl Host {
     /// Loads a plugin built as a library of its own, a Rust `cdylib` among them, and answers its entry, which the host
     /// registers as any other: the library's `symbol`, [`DEFAULT_ENTRY_SYMBOL`] when `None`, answers the plugin's
     /// entry table, and each activate is handed the host's context table of its plugin and its whole manifest, every
-    /// call across both catching a panic so none unwinds through the seam. The library stays open while any entry
-    /// loaded from it lives, and each is told to free its table once the host lets go of it. Answers
-    /// [`Answer::Mistake`] for a path that names no library, a symbol it lacks, a symbol answering no table, or a
-    /// table below its first shape; [`Answer::Destroyed`] once the destroy has been called.
+    /// call across both catching a panic so none unwinds through the seam. Once the host lets go of an entry, the
+    /// seam's own thread tells it to free its table and closes its library when no other entry of it is loaded, after
+    /// every call the plugin made into the host has returned. Answers [`Answer::Mistake`] for a path that names no
+    /// library, a symbol it lacks, a symbol answering no table, or a table below its first shape;
+    /// [`Answer::Destroyed`] once the destroy has been called.
     pub fn load_entry(&self, path: &Path, symbol: Option<&str>) -> Result<Arc<dyn Entry>, Answer> {
         if self.shared.is_destroy_called() {
             return Err(Answer::Destroyed);
@@ -136,8 +369,9 @@ impl Host {
         Ok(Arc::new(SeamEntryOf {
             entry: Arc::new(EntryHandle {
                 table,
-                _library: Arc::new(PluginLibrary { _library: library }),
+                library: Some(Arc::new(PluginLibrary { _library: library })),
             }),
+            registry: Arc::downgrade(&self.shared.seam),
             contexts: Mutex::new(HashMap::new()),
         }))
     }
@@ -162,38 +396,27 @@ pub(super) fn entry_table_of(table: *const SeamEntry, symbol: &str) -> Result<Se
 }
 
 fn box_of(id: u64) -> Option<Arc<ContextBox>> {
-    locked(&CONTEXTS).get(&id).cloned()
-}
-
-fn completion(settle: Settle<Finished>, context: u64) -> SeamCompletion {
-    let id = next_id();
-    locked(&COMPLETIONS).insert(id, CompletionRecord { settle, context });
-    SeamCompletion {
-        size: size_of_table::<SeamCompletion>(),
-        data: id,
-        finish: finish_completion,
-    }
-}
-
-fn settle_completion(id: u64, finished: Finished) {
-    if let Some(record) = locked(&COMPLETIONS).remove(&id) {
-        record.settle.settle(finished);
-    }
+    locked(&CONTEXT_IDS).get(&id).and_then(Weak::upgrade)
 }
 
 impl SeamEntryOf {
+    fn registry(&self) -> Option<Arc<SeamRegistry>> {
+        self.registry.upgrade()
+    }
+
     /// The box of `context`'s plugin, made at its first activate; what its last open made is let go of, since the
     /// core ended it.
-    fn box_for(&self, context: &Context) -> Arc<ContextBox> {
+    fn box_for(&self, registry: &Arc<SeamRegistry>, context: &Context) -> Arc<ContextBox> {
         let mut contexts = locked(&self.contexts);
         let id = *contexts.entry(context.plugin()).or_insert_with(next_id);
-        let boxed = locked(&CONTEXTS)
+        let boxed = locked(&registry.contexts)
             .entry(id)
             .or_insert_with(|| {
                 Arc::new(ContextBox {
                     id,
                     context: context.clone(),
                     entry: self.entry.clone(),
+                    registry: Arc::downgrade(registry),
                     registrations: Mutex::new(HashMap::new()),
                     wants: Mutex::new(HashMap::new()),
                     watches: Mutex::new(HashMap::new()),
@@ -202,9 +425,14 @@ impl SeamEntryOf {
                 })
             })
             .clone();
-        locked(&boxed.registrations).clear();
-        locked(&boxed.watches).clear();
-        locked(&boxed.revocations).clear();
+        locked(&CONTEXT_IDS).insert(id, Arc::downgrade(&boxed));
+        let ended = (
+            std::mem::take(&mut *locked(&boxed.registrations)),
+            std::mem::take(&mut *locked(&boxed.wants)),
+            std::mem::take(&mut *locked(&boxed.watches)),
+            std::mem::take(&mut *locked(&boxed.revocations)),
+        );
+        drop(ended);
         let forwarding = forward_events(&boxed);
         if let Some(previous) = locked(&boxed.forwarding).replace(forwarding) {
             previous.stop();
@@ -232,16 +460,21 @@ fn context_table(boxed: &ContextBox) -> SeamContext {
         provide: context_provide,
         implementations: context_implementations,
         dispatches_here: context_dispatches_here,
+        hold: context_hold,
+        unhold: context_unhold,
     }
 }
 
 impl Entry for SeamEntryOf {
     fn activate(&self, context: &Context) -> Pending<Finished> {
         let (activating, settle) = pending();
-        let boxed = self.box_for(context);
+        let Some(registry) = self.registry() else {
+            return Pending::settled(Err("the host is gone".to_owned()));
+        };
+        let boxed = self.box_for(&registry, context);
         let table = context_table(&boxed);
         let manifest = LentManifest::of(context.manifest());
-        let completion = completion(settle, boxed.id);
+        let completion = registry.completion(settle, boxed.id);
         let entry = &self.entry.table;
         // SAFETY: every table lives for the call; the plugin's side catches every panic.
         let taken = unsafe { (entry.activate)(entry.data, &table, &manifest.table(), &completion) };
@@ -256,12 +489,13 @@ impl Entry for SeamEntryOf {
 
     fn deactivate(&self) -> Option<Pending<Finished>> {
         let (deactivating, settle) = pending();
-        let completion = completion(settle, 0);
+        let registry = self.registry()?;
+        let completion = registry.completion(settle, 0);
         let entry = &self.entry.table;
         // SAFETY: as for `activate`.
         let taken = unsafe { (entry.deactivate)(entry.data, &completion) };
         if taken != 0 {
-            locked(&COMPLETIONS).remove(&completion.data);
+            registry.forget_completion(completion.data);
             return None;
         }
         Some(deactivating)
@@ -271,12 +505,22 @@ impl Entry for SeamEntryOf {
         let Some(id) = locked(&self.contexts).remove(&context.plugin()) else {
             return;
         };
-        let boxed = locked(&CONTEXTS).remove(&id);
-        locked(&COMPLETIONS).retain(|_, record| record.context != id);
-        if let Some(boxed) = boxed
-            && let Some(forwarding) = locked(&boxed.forwarding).take()
-        {
-            forwarding.stop();
+        locked(&CONTEXT_IDS).remove(&id);
+        if let Some(registry) = self.registry() {
+            let boxed = locked(&registry.contexts).remove(&id);
+            let ended: Vec<u64> = locked(&registry.completions)
+                .values()
+                .filter(|record| record.context == id)
+                .map(|record| record.id)
+                .collect();
+            for completion in ended {
+                registry.forget_completion(completion);
+            }
+            if let Some(boxed) = boxed
+                && let Some(forwarding) = locked(&boxed.forwarding).take()
+            {
+                forwarding.stop();
+            }
         }
         let entry = &self.entry.table;
         // SAFETY: the plugin's side catches every panic.
@@ -289,6 +533,7 @@ struct LentEvent {
     token: u64,
     address: usize,
     description: usize,
+    mapping: u64,
     registration: u64,
     awaits_release: bool,
     reach_kind: u32,
@@ -303,6 +548,7 @@ impl LentEvent {
             token: 0,
             address: 0,
             description: 0,
+            mapping: 0,
             registration: 0,
             awaits_release: false,
             reach_kind: 0,
@@ -326,6 +572,7 @@ impl LentEvent {
             settlement: settlement
                 .map_or(std::ptr::null(), |settled| settled as *const SeamAnswered),
             description: self.description,
+            mapping: self.mapping,
         });
     }
 }
@@ -345,18 +592,14 @@ fn forward_events(boxed: &Arc<ContextBox>) -> Listening {
                         .insert(revocation.registration.0, revocation.clone());
                 }
                 LentEvent {
-                    address: address_of(&revocation.object),
-                    description: description_of(&revocation.object),
                     registration: revocation.registration.0,
                     awaits_release: revocation.awaits_release,
-                    ..LentEvent::of(EVENT_REVOKED)
+                    ..crossed_event(EVENT_REVOKED, &boxed, &revocation.object)
                 }
             }
             PluginEvent::HoldingsReleased { id, service } => LentEvent {
-                address: address_of(service),
-                description: description_of(service),
                 id: id.clone(),
-                ..LentEvent::of(EVENT_HOLDINGS_RELEASED)
+                ..crossed_event(EVENT_HOLDINGS_RELEASED, &boxed, service)
             },
             PluginEvent::ReachRefused { kind, id, refusal } => LentEvent {
                 reach_kind: kind.0,
@@ -369,11 +612,9 @@ fn forward_events(boxed: &Arc<ContextBox>) -> Listening {
                 service,
                 unmet_constraint,
             } => LentEvent {
-                address: address_of(service),
-                description: description_of(service),
                 id: id.clone(),
                 refusal: Some(unmet_constraint.clone()),
-                ..LentEvent::of(EVENT_DEGRADED)
+                ..crossed_event(EVENT_DEGRADED, &boxed, service)
             },
         };
         told.tell(&boxed, None);
@@ -391,9 +632,9 @@ impl ForwardingWatcher {
         if let Some(boxed) = box_of(self.context) {
             LentEvent {
                 token: self.token,
-                address: object.map_or(0, address_of),
-                description: object.map_or(0, description_of),
-                ..LentEvent::of(kind)
+                ..object.map_or(LentEvent::of(kind), |object| {
+                    crossed_event(kind, &boxed, object)
+                })
             }
             .tell(&boxed, None);
         }
@@ -438,6 +679,7 @@ unsafe extern "C" fn take_capacity(
     attributes: *const SeamNumber,
     count: usize,
 ) {
+    let _call = CallFromAPlugin::enter();
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: `data` is the asker's own, for the length of the call; the attributes are lent for it too.
         let taken = unsafe { &mut *(data as *mut CapacityTaken) };
@@ -487,6 +729,7 @@ impl CapacityAnswerer for ForwardingAnswerer {
 }
 
 unsafe extern "C" fn finish_completion(data: u64, failed: u32, text: SeamText) {
+    let _call = CallFromAPlugin::enter();
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the text is lent for the call.
         let finished = if failed == 0 {
@@ -505,6 +748,7 @@ fn answered(
     answer: *const SeamAnswer,
     call: impl FnOnce(&ContextBox) -> Result<Answering, Answer>,
 ) {
+    let _call = CallFromAPlugin::enter();
     if answer.is_null() {
         return;
     }
@@ -528,39 +772,26 @@ fn answered(
     lend_answered(&outcome, |lent| unsafe { (answer.take)(answer.data, lent) });
 }
 
-/// The description of each definition a library the host loaded registered, by its definition's address, kept while
-/// that library's binary is, so a plugin across the seam binds the very definition an in-process plugin is handed.
-static DESCRIBED: Mutex<BTreeMap<usize, (usize, Weak<LibraryBinary>)>> =
-    Mutex::new(BTreeMap::new());
-
-/// Records the description `described` pairs with its definition, while `binary` stays open.
-pub(crate) fn remember_described(described: &DescribedDefinition, binary: &Arc<LibraryBinary>) {
-    let mut kept = locked(&DESCRIBED);
-    kept.retain(|_, (_, library)| library.strong_count() > 0);
-    kept.insert(
-        described.definition_address(),
-        (described.description_address(), Arc::downgrade(binary)),
-    );
-}
-
-/// The description of `object` when a description bound it, 0 otherwise.
-fn description_of(object: &Object) -> usize {
-    let Some(bound) = object.downcast_ref::<BoundDefinition>() else {
-        return 0;
-    };
-    locked(&DESCRIBED)
-        .get(&bound.address())
-        .filter(|(_, library)| library.strong_count() > 0)
-        .map_or(0, |(description, _)| *description)
-}
-
-/// An object as it crosses: its address, and its description where one bound it.
-fn crossing(object: &Object) -> Result<Answering, Answer> {
+/// An object as it crosses: its address, and where a description bound it, that description and its library.
+fn crossing(boxed: &ContextBox, object: &Object) -> Result<Answering, Answer> {
+    let (description, mapping) = boxed.description_of(object);
     Ok(Answering {
         number: address_of(object) as u64,
-        description: description_of(object),
+        description,
+        mapping,
         ..Answering::default()
     })
+}
+
+/// The parts of an event that carry `object` across.
+fn crossed_event(kind: u32, boxed: &ContextBox, object: &Object) -> LentEvent {
+    let (description, mapping) = boxed.description_of(object);
+    LentEvent {
+        address: address_of(object),
+        description,
+        mapping,
+        ..LentEvent::of(kind)
+    }
 }
 
 fn done() -> Result<Answering, Answer> {
@@ -586,6 +817,7 @@ unsafe fn text(text: SeamText) -> String {
 }
 
 unsafe extern "C" fn context_write(data: u64, level: u32, written: SeamText) {
+    let _call = CallFromAPlugin::enter();
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(boxed) = box_of(data) {
             // SAFETY: the text is lent for the call.
@@ -598,6 +830,7 @@ unsafe extern "C" fn context_write(data: u64, level: u32, written: SeamText) {
 }
 
 unsafe extern "C" fn context_report(data: u64, kind: u32, reported: SeamText) {
+    let _call = CallFromAPlugin::enter();
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(boxed) = box_of(data) {
             // SAFETY: the text is lent for the call.
@@ -609,6 +842,7 @@ unsafe extern "C" fn context_report(data: u64, kind: u32, reported: SeamText) {
 }
 
 unsafe extern "C" fn context_dispatches_here(data: u64) -> u32 {
+    let _call = CallFromAPlugin::enter();
     catch_unwind(|| box_of(data).is_some_and(|boxed| boxed.context.dispatches_here()))
         .map(u32::from)
         .unwrap_or(0)
@@ -617,7 +851,7 @@ unsafe extern "C" fn context_dispatches_here(data: u64) -> u32 {
 unsafe extern "C" fn context_get(data: u64, id: SeamText, answer: *const SeamAnswer) {
     // SAFETY: the id is lent for the call.
     answered(data, answer, |boxed| {
-        crossing(&boxed.context.get(&unsafe { text(id) })?)
+        crossing(boxed, &boxed.context.get(&unsafe { text(id) })?)
     });
 }
 
@@ -656,7 +890,10 @@ fn tell_settlement(context: u64, token: u64, settlement: &Result<Object, Answer>
         return;
     };
     locked(&boxed.wants).remove(&token);
-    let answered = settlement.as_ref().map_err(Clone::clone).and_then(crossing);
+    let answered = settlement
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|object| crossing(&boxed, object));
     lend_answered(&answered, |lent| {
         LentEvent {
             token,
@@ -708,12 +945,32 @@ unsafe extern "C" fn context_watch(
             context: boxed.id,
             token,
         });
-        let watching = if capability != 0 {
-            boxed.context.watch_capability(&id, watcher)?
+        locked(&boxed.watches).insert(token, None);
+        let watched = if capability != 0 {
+            boxed.context.watch_capability(&id, watcher)
         } else {
-            boxed.context.watch(&id, watcher)?
+            boxed.context.watch(&id, watcher)
         };
-        locked(&boxed.watches).insert(token, watching);
+        let watching = match watched {
+            Ok(watching) => watching,
+            Err(refused) => {
+                locked(&boxed.watches).remove(&token);
+                return Err(refused);
+            }
+        };
+        let stopped_meanwhile = {
+            let mut watches = locked(&boxed.watches);
+            match watches.get_mut(&token) {
+                Some(slot) => {
+                    *slot = Some(watching);
+                    None
+                }
+                None => Some(watching),
+            }
+        };
+        if let Some(watching) = stopped_meanwhile {
+            watching.stop()?;
+        }
         done()
     });
 }
@@ -723,7 +980,9 @@ unsafe extern "C" fn context_stop_watch(data: u64, token: u64, answer: *const Se
         let watching = locked(&boxed.watches)
             .remove(&token)
             .ok_or(Answer::Absent)?;
-        watching.stop()?;
+        if let Some(watching) = watching {
+            watching.stop()?;
+        }
         done()
     });
 }
@@ -810,17 +1069,17 @@ unsafe extern "C" fn context_implementations(data: u64, id: SeamText, answer: *c
         let implementations = boxed.context.implementations(&unsafe { text(id) })?;
         Ok(Answering {
             addresses: implementations.iter().map(address_of).collect(),
-            descriptions: implementations.iter().map(description_of).collect(),
+            descriptions: implementations
+                .iter()
+                .map(|object| boxed.description_of(object).0)
+                .collect(),
+            mappings: implementations
+                .iter()
+                .map(|object| boxed.description_of(object).1)
+                .collect(),
             ..Answering::default()
         })
     });
-}
-
-/// How many contexts and completions the host's side of the seam keeps now: what a test reads to prove each is let
-/// go of at its end.
-#[cfg(test)]
-pub(super) fn kept_counts() -> (usize, usize) {
-    (locked(&CONTEXTS).len(), locked(&COMPLETIONS).len())
 }
 
 /// Calls the table's get with no answer, as a plugin handing NULL would.
@@ -831,4 +1090,24 @@ pub(super) fn kept_counts() -> (usize, usize) {
 pub(super) unsafe fn call_get_without_an_answer() {
     // SAFETY: the id lives for the call, and a NULL answer is what is under test.
     unsafe { context_get(1, SeamText::of("x"), std::ptr::null()) };
+}
+
+unsafe extern "C" fn context_hold(data: u64, mapping: u64) -> u32 {
+    let _call = CallFromAPlugin::enter();
+    catch_unwind(|| {
+        box_of(data)
+            .and_then(|boxed| boxed.registry.upgrade())
+            .is_some_and(|registry| registry.hold(mapping))
+    })
+    .map(u32::from)
+    .unwrap_or(0)
+}
+
+unsafe extern "C" fn context_unhold(data: u64, mapping: u64) {
+    let _call = CallFromAPlugin::enter();
+    let _ = catch_unwind(|| {
+        if let Some(registry) = box_of(data).and_then(|boxed| boxed.registry.upgrade()) {
+            registry.unhold(mapping);
+        }
+    });
 }
