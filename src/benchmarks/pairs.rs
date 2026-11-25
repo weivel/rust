@@ -14,7 +14,10 @@ use super::world::{
     echo_definition_declaration, mirror_declaration,
 };
 use crate::context::{ForeignObject, Object};
-use crate::host::{BoundDefinition, DescribedAnswer, Inputs, LibraryAnswer, LibraryService, Value};
+use crate::host::{
+    BoundDefinition, DescribedAnswer, Inputs, LibraryAnswer, LibraryService,
+    LibraryServiceFunction, Value,
+};
 
 /// How a benchmark samples, and which path, if any, it slows.
 #[derive(Debug, Clone, Copy, Default)]
@@ -231,8 +234,8 @@ fn echo_service(world: &World) -> Result<Object, BenchmarkFailure> {
     Ok(echo)
 }
 
-fn echo_through(service: &LibraryService, input: &[u8]) -> usize {
-    match service.call("echo", input) {
+fn echo_through(echo: &LibraryServiceFunction<'_>, input: &[u8]) -> usize {
+    match echo.call(input) {
         LibraryAnswer::Returned(bytes) => bytes.len(),
         other => panic!("the echo service answered {other:?}"),
     }
@@ -249,7 +252,9 @@ pub fn benchmark_library_call(
     let echo = echo_service(&world)?;
     let service = echo
         .downcast_ref::<LibraryService>()
-        .expect("checked above");
+        .and_then(|service| service.function("echo"))
+        .ok_or_else(|| failure("the echo service offers no function echo"))?;
+    let service = &service;
     let bare_echo = BareEcho::open(&files.echo)
         .ok_or_else(|| failure("the echo library did not open through the platform's loader"))?;
     if bare_echo.echo(&ECHO_INPUT) != (0, ECHO_INPUT.len())
@@ -405,7 +410,9 @@ pub fn benchmark_described_call(
     let echo = echo_service(&world)?;
     let service = echo
         .downcast_ref::<LibraryService>()
-        .expect("checked above");
+        .and_then(|service| service.function("echo"))
+        .ok_or_else(|| failure("the echo service offers no function echo"))?;
+    let service = &service;
     let mirror_object = world.resolved(MIRROR_ID)?;
     let mirror = mirror_object
         .downcast_ref::<BoundDefinition>()

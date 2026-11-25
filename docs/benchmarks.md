@@ -17,8 +17,8 @@ timed loop.
 
 `control-call` is `weivel_get_service` through the wrapper, on a host whose timer is armed on the system scheduler as a
 host arms it, over the same function of the core's table called with the very core the wrapper calls, the same plugin
-and id, nothing around it. `library-call` is the echo library's `echo_echo` through the host's `LibraryService`, 16
-bytes in and the same 16 back, over the same function reached through the platform's loader and called directly, its
+and id, nothing around it. `library-call` is the echo library's `echo_echo` through the host's `LibraryService`, the
+function found by name once, 16 bytes in and the same 16 back, over the same function reached through the platform's loader and called directly, its
 answer released through `echo_release` as the host releases it. `described-call` is the standard's described mirror's
 `reflect`, a sample holding a text and a counted array of three texts in and its reflection out, called on the
 `BoundDefinition` a consumer resolved, over the same operation through a binding of the fixture's structs written by

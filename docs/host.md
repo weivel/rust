@@ -54,7 +54,8 @@ it, a plugin offered nothing under the id nothing, as the get of an unregistered
 of an id withdrawn unregisters the registration. `Host::service_registered_by` answers the object one plugin itself
 registered under an id, never a registration of another plugin or of the host. `Host::load_library` loads a C library from a `LibraryDeclaration`,
 which the caller builds, and the library's path. A service of bytes functions is registered as a `LibraryService`,
-whose `call` lends the input for the call and answers the library's bytes in place as `LibraryBytes`, released through
+whose `call` lends the input for the call and answers the library's bytes in place as `LibraryBytes`, and whose
+`function` finds one function by name once for a caller that calls it again and again, released through
 the library's release symbol when dropped and keeping the binary open until then, so there is no copy. A definition
 service declaring no description is registered awaiting releases as a `ForeignObject` carrying the very address its symbol answered, called
 once at the load; a definition answering NULL, or a struct whose `size` is below `2 * sizeof(void *)`, refuses the
