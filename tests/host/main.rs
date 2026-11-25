@@ -15,6 +15,9 @@ use weivel_rust::context::{Context, HostLog, LogRecord, Pending, pending};
 use weivel_rust::core::{CoreOptions, ErrorSink, Failure, Manifest, ServiceOffer, ServiceWant};
 use weivel_rust::host::{Entry, Finished, Host, HostOptions, HostScheduler};
 
+/// A process maps a library once however often it is opened, so the tests that load the same C library take turns.
+pub static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 /// Every record the host's log and its error sink received.
 #[derive(Default)]
 pub struct Kept {

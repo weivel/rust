@@ -41,7 +41,9 @@ pub use entry::{
 };
 pub use libraries::{LibraryAnswer, LibraryService, LoadedLibrary};
 pub use seam::{
-    DEFAULT_ENTRY_SYMBOL, SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamText, seam_entry,
+    DEFAULT_ENTRY_SYMBOL, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext,
+    SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamOffer, SeamRefusal, SeamText, SeamTexts,
+    SeamWant, SeamWantLimits, seam_entry,
 };
 pub use services::HostService;
 pub use state::Host;

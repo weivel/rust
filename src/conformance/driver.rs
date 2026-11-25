@@ -159,7 +159,7 @@ impl LayerDriver {
             logs: world.logs(),
             failures: world.failures(),
         };
-        world.host.destroy();
+        world.host.destroy().wait();
         Ok(witness)
     }
 }

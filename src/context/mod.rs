@@ -22,10 +22,13 @@ pub use contexts::{Contexts, Verification};
 pub use enums::DescribedEnums;
 pub(crate) use link::SeamCalls;
 pub use log::{HostLog, LogRecord, PluginLog};
+pub(crate) use pending::pending_settled_by;
 pub use pending::{Pending, Settle, pending};
 pub use plugin::{Context, Listening};
+pub(crate) use records::WantRecord;
 pub use records::{
     CapabilityWatcher, CapacityAnswerer, ForeignObject, Object, PluginEvent, PluginListener,
     Revocation, ServiceWatcher, WantSettlement, address_of,
 };
+pub(crate) use services::Registering;
 pub use services::{ServiceRegistration, Want, WantLimits, Watching};

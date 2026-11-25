@@ -5,4 +5,5 @@ The plugin seam: the size-prefixed C tables a host and a plugin built as a libra
 - [host_side.rs](../../../../../src/host/seam/host_side.rs) - the host's side: a plugin's library loaded by its entry symbol, and the context table each activate is handed
 - [mod.rs](../../../../../src/host/seam/mod.rs) - the seam's public surface and `export_entry!`, which exports a plugin's entry from its library
 - [plugin_side.rs](../../../../../src/host/seam/plugin_side.rs) - the plugin's side: its entry behind the entry table, and the host's context table behind the same safe `Context`
+- [tests.rs](../../../../../src/host/seam/tests.rs) - the tables held to their sizes both ways, texts and refusals crossing whole, events reaching the context they name, and what the host keeps let go of at the forget
 <!-- end generated -->

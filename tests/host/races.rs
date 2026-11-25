@@ -271,23 +271,29 @@ fn the_destroy_waits_for_an_open_under_way() {
     assert!(defects(&kept).is_empty(), "{:?}", defects(&kept));
 }
 
-/// Waits on the activating thread, which runs the plan as the dispatcher, for a result nothing settles.
+/// Waits on the activating thread, which runs the plan as the dispatcher, for a want only that dispatch settles.
 struct WaitsAsTheDispatcher;
 
 impl Entry for WaitsAsTheDispatcher {
-    fn activate(&self, _: &Context) -> Pending<Finished> {
-        pending::<()>().0.wait();
-        Pending::settled(Ok(()))
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let settled = context
+            .want("nothing:here", WantLimits::unbounded())
+            .settlement()
+            .wait();
+        Pending::settled(settled.map(|_| ()).map_err(|refused| refused.to_string()))
     }
 }
 
 #[test]
-fn waiting_on_the_dispatching_thread_for_an_unsettled_result_panics_rather_than_hangs() {
+fn waiting_on_the_dispatching_thread_for_its_own_want_panics_rather_than_hangs() {
     let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
     let plugin = host
-        .register(manifest("waits", &[], &[]), Arc::new(WaitsAsTheDispatcher))
+        .register(
+            manifest("waits", &[], &["nothing:here"]),
+            Arc::new(WaitsAsTheDispatcher),
+        )
         .unwrap();
-    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::CAPABILITIES).unwrap();
     assert_eq!(
         activation.outcomes[0].wait().state,
         ActivationState::Quarantined
@@ -298,9 +304,131 @@ fn waiting_on_the_dispatching_thread_for_an_unsettled_result_panics_rather_than_
         .find(|row| row.import_name == "waits")
         .unwrap();
     assert!(
-        row.refusal.detail.contains("dispatching"),
+        row.refusal.detail.contains("would never settle"),
         "{:?}",
         row.refusal
     );
     host.destroy().wait();
+}
+
+/// Releases its own plugin from inside its activate and waits for that release, which waits for this activate.
+struct ReleasesItselfAndWaits {
+    host: Mutex<Option<Host>>,
+}
+
+impl Entry for ReleasesItselfAndWaits {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let host = self
+            .host
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the test hands the host");
+        let released = host.release(context.plugin()).wait();
+        Pending::settled(Err(format!("the wait came back with {released:?}")))
+    }
+}
+
+#[test]
+fn a_release_waited_for_inside_the_released_plugins_own_activate_panics_rather_than_hangs() {
+    let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let entry = Arc::new(ReleasesItselfAndWaits {
+        host: Mutex::new(Some(host.clone())),
+    });
+    let plugin = host
+        .register(manifest("self", &[], &[]), entry.clone())
+        .unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Quarantined
+    );
+    let ledger = host.ledger().unwrap();
+    assert!(ledger.iter().all(|row| row.import_name != "self"));
+    entry.host.lock().unwrap().take();
+    host.destroy().wait();
+}
+
+/// Waits, on the thread dispatching its own host, for a want of another host that another thread settles.
+struct WaitsOnAnotherHost {
+    want: Mutex<Option<Pending<weivel_rust::context::WantSettlement>>>,
+    providing: Mutex<Option<(Host, weivel_rust::core::Handle)>>,
+}
+
+impl Entry for WaitsOnAnotherHost {
+    fn activate(&self, _: &Context) -> Pending<Finished> {
+        let want = self
+            .want
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the test hands the want");
+        let (other, provider) = self
+            .providing
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the test hands the provider");
+        let providing = thread::spawn(move || {
+            other
+                .activate(&[provider], EdgeSource::CAPABILITIES)
+                .unwrap();
+        });
+        let settled = want.wait();
+        providing.join().unwrap();
+        Pending::settled(settled.map(|_| ()).map_err(|refused| refused.to_string()))
+    }
+}
+
+/// Registers its service, so the other host's want settles.
+struct RegistersTheService;
+
+impl Entry for RegistersTheService {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let registered = context.register("other:feed", Arc::new(()));
+        Pending::settled(
+            registered
+                .map(|_| ())
+                .map_err(|refused| refused.to_string()),
+        )
+    }
+}
+
+#[test]
+fn waiting_while_dispatching_one_host_for_a_result_another_host_settles_is_waited_for() {
+    let (waiting_host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let (other, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let consumer = other
+        .register(
+            manifest("consumer", &[], &["other:feed"]),
+            Arc::new(Held::default()),
+        )
+        .unwrap();
+    let provider = other
+        .register(
+            manifest("other", &["other:feed"], &[]),
+            Arc::new(RegistersTheService),
+        )
+        .unwrap();
+    other
+        .activate(&[consumer], EdgeSource::CAPABILITIES)
+        .unwrap();
+    let want = other
+        .context(consumer)
+        .unwrap()
+        .want("other:feed", WantLimits::unbounded())
+        .settlement();
+    let entry = Arc::new(WaitsOnAnotherHost {
+        want: Mutex::new(Some(want)),
+        providing: Mutex::new(Some((other.clone(), provider))),
+    });
+    let waiter = waiting_host
+        .register(manifest("waiter", &[], &[]), entry)
+        .unwrap();
+    let activation = waiting_host
+        .activate(&[waiter], EdgeSource::SERVICES)
+        .unwrap();
+    assert_eq!(activation.outcomes[0].wait().state, ActivationState::Active);
+    waiting_host.destroy().wait();
+    other.destroy().wait();
 }

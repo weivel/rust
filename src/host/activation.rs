@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use super::entry::{Activation, ActivationState, Finished, Outcome};
 use super::state::{Host, HostShared, InFlight, UnderWayMark};
-use crate::context::{Context, Pending, Verification, pending};
+use crate::context::{Context, Pending, Verification};
 use crate::core::{
     Answer, EdgeSource, FailureKind, Handle, QuarantineReason, RefusalCode, RefusalStatus,
     panic_text,
@@ -185,7 +185,7 @@ impl HostShared {
     /// then released at once without its activate being called. A release asked for while the activate runs waits for
     /// it to return, so no deactivate runs before its activate.
     fn activated(shared: &Arc<HostShared>, plugin: Handle, context: Context) -> Pending<Outcome> {
-        let (outcome, settle) = pending();
+        let (outcome, settle) = shared.settled_by_its_dispatch();
         let (serial, entry) = {
             let mut records = shared.records();
             let destroying = records.destroy.is_some();
@@ -207,6 +207,7 @@ impl HostShared {
                 settle: Some(settle),
             });
             record.activate_running = true;
+            record.activating_thread = Some(std::thread::current().id());
             (serial, record.entry.clone())
         };
         let activating = catch_unwind(AssertUnwindSafe(|| entry.activate(&context)));
@@ -225,6 +226,7 @@ impl HostShared {
         }
         if let Some(record) = shared.records().plugins.get_mut(&plugin) {
             record.activate_running = false;
+            record.activating_thread = None;
         }
         HostShared::begin_a_waiting_release(shared, plugin);
         outcome

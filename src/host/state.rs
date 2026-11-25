@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::entry::{Entry, HostOptions, HostScheduler, Outcome};
 use super::libraries::LoadedLibrary;
-use crate::context::{Context, Contexts, HostLog, LogRecord, Pending, Settle, pending};
+use crate::context::{Context, Contexts, HostLog, LogRecord, Pending, Settle, pending_settled_by};
 use crate::core::{
     Answer, Core, CoreBinary, Failure, FailureKind, Handle, LedgerRow, Manifest, Wrapping,
 };
@@ -27,6 +27,8 @@ pub(super) struct PluginRecord {
     pub(super) activate_called: bool,
     /// True from the call of the activate until that call returned; a release waits for it.
     pub(super) activate_running: bool,
+    /// The thread calling the activate while it runs.
+    pub(super) activating_thread: Option<std::thread::ThreadId>,
     /// True while a settled activate is verified or quarantined; a release waits for it.
     pub(super) settling: bool,
     pub(super) release: Option<Pending<Result<bool, Answer>>>,
@@ -102,8 +104,6 @@ pub(super) struct HostShared {
     pub(super) system_scheduler: Mutex<Option<Arc<SystemScheduler>>>,
     pub(super) description_check: Option<Arc<dyn super::DescriptionCheck>>,
     pub(super) records: Mutex<Records>,
-    /// Every plugin library loaded across the seam, open until the host is freed.
-    pub(super) plugin_libraries: Mutex<Vec<Arc<super::seam::PluginLibrary>>>,
 }
 
 /// Registers plugins written in Rust, activates, verifies and releases them, offers host services, loads C libraries
@@ -155,7 +155,6 @@ impl Host {
                 system_scheduler: Mutex::new(system),
                 description_check: options.description_check.clone(),
                 records: Mutex::new(Records::default()),
-                plugin_libraries: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -175,6 +174,7 @@ impl Host {
                 in_flight: None,
                 activate_called: false,
                 activate_running: false,
+                activating_thread: None,
                 settling: false,
                 release: None,
                 waiting_release: None,
@@ -215,7 +215,7 @@ impl Host {
     /// the timer and destroys the core. The result settles once all of it has run; a second destroy answers the first
     /// one's.
     pub fn destroy(&self) -> Pending<()> {
-        let (destroyed, settle) = pending();
+        let (destroyed, settle) = self.shared.settled_by_its_dispatch();
         let opened = {
             let mut records = self.shared.records();
             if let Some(destroy) = &records.destroy {
@@ -294,6 +294,12 @@ impl Drop for UnderWayMark {
 }
 
 impl HostShared {
+    /// A result the host's own steps settle, which a wait on a thread dispatching its core would never see.
+    pub(super) fn settled_by_its_dispatch<T>(&self) -> (Pending<T>, Settle<T>) {
+        let core = self.core.clone();
+        pending_settled_by(Arc::new(move || core.dispatches_here()))
+    }
+
     pub(super) fn records(&self) -> MutexGuard<'_, Records> {
         self.records
             .lock()

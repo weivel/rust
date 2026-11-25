@@ -96,7 +96,7 @@ pub(crate) struct LibraryRun {
     declaration: Option<LibraryDeclaration>,
     activates: HashMap<String, Arc<HeldActivate>>,
     heard: Arc<Mutex<Heard>>,
-    counter: &'static AtomicU64,
+    counter: Arc<AtomicU64>,
     load: Option<Result<LoadedLibrary, Answer>>,
     answered_addresses: HashMap<String, usize>,
     echoed: Vec<String>,
@@ -125,8 +125,7 @@ pub(crate) fn drive(
         declaration,
         activates: HashMap::new(),
         heard: Arc::default(),
-        // The library writes the count as its binary closes, which may be as late as the host's destroy.
-        counter: Box::leak(Box::new(AtomicU64::new(0))),
+        counter: world.keep_until_destroyed(Arc::new(AtomicU64::new(0))),
         load: None,
         answered_addresses: HashMap::new(),
         echoed: Vec::new(),
@@ -488,7 +487,7 @@ impl LibraryRun {
             "countUnloads" => {
                 shapes::refuse_unknown_keys(place, step, &["holder", "countUnloads"])?;
                 shapes::require_true(place, step, "countUnloads")?;
-                echo::count_unloads(self.first_definition(holder)?, self.counter)
+                echo::count_unloads(self.first_definition(holder)?, &self.counter)
             }
             _ => {
                 shapes::refuse_unknown_keys(place, step, &["holder", "releaseHolding"])?;

@@ -41,7 +41,10 @@ hears any event about it: one its own release or quarantine queued still reaches
 one. `Contexts` registers the host's own services under `WEIVEL_HOST` through a context of the host's, and a C
 library's definitions awaiting releases, whose last release lets go of the library's binary. A watch takes the room of
 each holding it hears as it hears it, and a watch that cannot is told to the error sink as an unknown object, where a
-want takes its room when it is made.
+want takes its room when it is made. A result one of the crate's own steps settles knows what settles it: a want's
+settlement, a host's release, destroy and activation outcomes. Waiting for one with `Pending::wait` on the thread
+dispatching the core whose dispatch settles it, or for a release inside the released plugin's own activate, panics
+rather than hangs; a result the caller made with `pending` carries no such knowledge and is waited for as asked.
 
 A context of a plugin across the plugin seam is the same `Context` over the host's context table rather than over the
-core: what the table carries is in [the host doc](host.md), and every other call answers the caller's mistake.
+core, and carries every call and every event, as [the host doc](host.md) says.

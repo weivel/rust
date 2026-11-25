@@ -3,12 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::link::{Link, not_carried};
-use super::pending::{Pending, pending};
+use super::link::Link;
+use super::pending::{Pending, pending_settled_by};
 use super::plugin::Context;
 use super::records::{
-    Awaiting, CapacityAnswerer, ForeignObject, Object, Record, Released, Revocation,
-    ServiceWatcher, WantRecord, WantSettlement, address_of,
+    Awaiting, CapacityAnswerer, Object, Record, Released, Revocation, ServiceWatcher, WantRecord,
+    WantSettlement,
 };
 use crate::core::{Answer, FailureKind, Handle, WantOptions};
 use crate::handles::HandleKind;
@@ -65,7 +65,10 @@ impl Want {
         let Some(want) = self.want else {
             return Err(Answer::Absent);
         };
-        let state = self.context.inner.link.local("a want")?;
+        let state = match &self.context.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => return seam.withdraw(want),
+        };
         let ended = state.call(&self.context.inner, |hold| {
             hold.unregister(want)?;
             Ok(state.handles.end(want))
@@ -90,7 +93,10 @@ impl Watching {
 
     /// Stops the watch; it hears nothing after.
     pub fn stop(&self) -> Result<(), Answer> {
-        let state = self.context.inner.link.local("a watch")?;
+        let state = match &self.context.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => return seam.stop_watch(self.watch),
+        };
         state.call(&self.context.inner, |hold| {
             hold.unregister(self.watch)?;
             state.handles.end(self.watch);
@@ -137,13 +143,7 @@ impl Context {
     pub fn get(&self, id: &str) -> Result<Object, Answer> {
         let state = match &self.inner.link {
             Link::Local(state) => state,
-            Link::Seam(seam) => {
-                let address = seam.get(id)?;
-                return Ok(self
-                    .inner
-                    .crossed_at(address)
-                    .unwrap_or_else(|| Arc::new(ForeignObject::at(address))));
-            }
+            Link::Seam(seam) => return seam.get(id),
         };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
@@ -166,15 +166,16 @@ impl Context {
     /// The ids this plugin may reach that are registered now, in the order the core answers them.
     pub fn ids(&self) -> Result<Vec<String>, Answer> {
         let plugin = self.plugin();
-        self.inner
-            .link
-            .local("listing the service ids")?
-            .call(&self.inner, |hold| hold.service_ids(plugin))
+        match &self.inner.link {
+            Link::Local(state) => state.call(&self.inner, |hold| hold.service_ids(plugin)),
+            Link::Seam(seam) => seam.ids(),
+        }
     }
 
     /// Wants the service registered under `id`, now or whenever it arrives.
     pub fn want(&self, id: &str, limits: WantLimits) -> Want {
-        let (settlement, settle) = pending();
+        let link = self.inner.link.clone();
+        let (settlement, settle) = pending_settled_by(Arc::new(move || link.dispatches_here()));
         let record = Arc::new(WantRecord {
             id: id.to_owned(),
             settle: Mutex::new(Some(settle)),
@@ -200,10 +201,13 @@ impl Context {
         limits: WantLimits,
         record: &Arc<WantRecord>,
     ) -> Result<Handle, Answer> {
-        let state = self.inner.link.local("a want")?;
         if self.is_detached() {
             return Err(Answer::Detached);
         }
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => return seam.want(id, &limits, record.clone()),
+        };
         let options = self.want_options(limits)?;
         let entry_room = state.handles.reserve()?;
         *record
@@ -231,7 +235,10 @@ impl Context {
         if !limits.needs_the_time() {
             return Ok(WantOptions::default());
         }
-        let now = self.inner.link.local("a want")?.timer.time().ok_or_else(|| {
+        let Link::Local(state) = &self.inner.link else {
+            return Ok(WantOptions::default());
+        };
+        let now = state.timer.time().ok_or_else(|| {
             Answer::Mistake(
                 "a want with a timeout, a budget or a poll interval needs the time, and the host's scheduler has no clock"
                     .to_owned(),
@@ -250,7 +257,10 @@ impl Context {
     /// Watches `id`: every later registration the core reports for it is heard with the provider's own object, and
     /// every unregistration with nothing, until the watch stops.
     pub fn watch(&self, id: &str, watcher: Arc<dyn ServiceWatcher>) -> Result<Watching, Answer> {
-        let state = self.inner.link.local("a watch")?;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => return Ok(Watching::new(self.clone(), seam.watch(id, watcher)?)),
+        };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let watch = state.call(&self.inner, |hold| {
@@ -322,10 +332,7 @@ impl Context {
     pub fn release_holding(&self, revocation: &Revocation) -> Result<bool, Answer> {
         let state = match &self.inner.link {
             Link::Local(state) => state,
-            Link::Seam(seam) if revocation.awaits_release => {
-                return seam.release_holding(revocation.registration);
-            }
-            Link::Seam(_) => return Ok(false),
+            Link::Seam(seam) => return seam.release_holding(revocation),
         };
         if !revocation.awaits_release
             || !state.releases.take_revoked(
@@ -358,11 +365,7 @@ impl Context {
         let state = match &self.inner.link {
             Link::Local(state) => state,
             Link::Seam(seam) => {
-                if answerer.is_some() {
-                    return Err(not_carried("a capacity answerer"));
-                }
-                let registration = seam.register(id, address_of(&service), awaiting.is_some())?;
-                self.inner.keep_crossed(service);
+                let registration = seam.register(id, service, awaiting.is_some(), answerer)?;
                 return Ok(ServiceRegistration {
                     context: self.clone(),
                     registration,

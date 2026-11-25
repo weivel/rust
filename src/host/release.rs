@@ -6,8 +6,11 @@ use std::sync::{Arc, Weak};
 
 use super::entry::{ActivationState, Finished, Outcome};
 use super::state::{Host, HostShared, Records};
-use crate::context::{Context, Pending, Settle, pending};
+use crate::context::{Context, Pending, Settle, pending_settled_by};
 use crate::core::{Answer, FailureKind, Handle, panic_text};
+
+/// What a release answers once it has run.
+type Released = Result<bool, Answer>;
 
 /// What a release found to do once it began.
 struct ReleaseStart {
@@ -60,7 +63,7 @@ impl HostShared {
         shared: &Arc<HostShared>,
         plugin: Handle,
     ) -> Pending<Result<bool, Answer>> {
-        let (released, settle) = pending();
+        let (released, settle) = HostShared::release_to_come(shared, plugin);
         {
             let mut records = shared.records();
             if !records.opened.contains(&plugin) {
@@ -81,6 +84,24 @@ impl HostShared {
         }
         HostShared::begin_a_waiting_release(shared, plugin);
         released
+    }
+
+    /// The result of a release of `plugin`, which a wait on the thread dispatching the core, or on the thread running
+    /// that plugin's own activate, would never see settle, since the release waits for that activate to return.
+    fn release_to_come(
+        shared: &Arc<HostShared>,
+        plugin: Handle,
+    ) -> (Pending<Released>, Settle<Released>) {
+        let host: Weak<HostShared> = Arc::downgrade(shared);
+        pending_settled_by(Arc::new(move || {
+            let Some(shared) = host.upgrade() else {
+                return false;
+            };
+            let in_its_own_activate = shared.records().plugins.get(&plugin).is_some_and(|record| {
+                record.activating_thread == Some(std::thread::current().id())
+            });
+            in_its_own_activate || shared.core.dispatches_here()
+        }))
     }
 
     /// Begins the release asked for `plugin` when one waits and its activate neither runs nor settles.
@@ -154,7 +175,22 @@ impl HostShared {
         let shared = self.clone();
         self.run_deferred(move || {
             let _ = shared.contexts.forget(&start.context);
-            shared.records().plugins.remove(&start.plugin);
+            let forgotten = shared.records().plugins.remove(&start.plugin);
+            if let Some(record) = forgotten {
+                let entry = record.entry.clone();
+                drop(record);
+                if let Err(payload) =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| entry.forgotten(&start.context)))
+                {
+                    shared.report(
+                        FailureKind::PluginCallback,
+                        format!(
+                            "a plugin's entry panicked hearing it was forgotten: {}",
+                            panic_text(&*payload)
+                        ),
+                    );
+                }
+            }
             start.settle.settle(Ok(true));
             let mut records = shared.records();
             records.under_way.releases = records.under_way.releases.saturating_sub(1);
