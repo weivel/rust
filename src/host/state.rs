@@ -102,6 +102,8 @@ pub(super) struct HostShared {
     pub(super) system_scheduler: Mutex<Option<Arc<SystemScheduler>>>,
     pub(super) description_check: Option<Arc<dyn super::DescriptionCheck>>,
     pub(super) records: Mutex<Records>,
+    /// Every plugin library loaded across the seam, open until the host is freed.
+    pub(super) plugin_libraries: Mutex<Vec<Arc<super::seam::PluginLibrary>>>,
 }
 
 /// Registers plugins written in Rust, activates, verifies and releases them, offers host services, loads C libraries
@@ -153,6 +155,7 @@ impl Host {
                 system_scheduler: Mutex::new(system),
                 description_check: options.description_check.clone(),
                 records: Mutex::new(Records::default()),
+                plugin_libraries: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -384,5 +387,34 @@ impl HostShared {
         if let Some(system) = system {
             system.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn the_destroy_joins_the_system_schedulers_thread() {
+        let library = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("build")
+            .join("native")
+            .join(format!("{DLL_PREFIX}weivel_core{DLL_SUFFIX}"));
+        let binary = CoreBinary::load(&library)
+            .expect("the pinned core loads: run `cargo run -p native` first");
+        let host = Host::create(&binary, HostOptions::default()).expect("the host is created");
+        let system = host
+            .shared
+            .system_scheduler
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a host given no scheduler starts the system one");
+        assert!(!system.has_joined());
+        host.destroy().wait();
+        assert!(system.has_joined());
     }
 }

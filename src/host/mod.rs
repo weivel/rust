@@ -18,6 +18,7 @@ mod entry;
 mod libraries;
 #[forbid(unsafe_code)]
 mod release;
+mod seam;
 #[forbid(unsafe_code)]
 mod services;
 #[forbid(unsafe_code)]
@@ -32,5 +33,8 @@ pub use entry::{
     Outcome,
 };
 pub use libraries::{LibraryAnswer, LibraryService, LoadedLibrary};
+pub use seam::{
+    DEFAULT_ENTRY_SYMBOL, SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamText, seam_entry,
+};
 pub use services::HostService;
 pub use state::Host;

@@ -3,11 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use super::link::{Link, not_carried};
 use super::pending::{Pending, pending};
 use super::plugin::Context;
 use super::records::{
-    Awaiting, CapacityAnswerer, Object, Record, Released, Revocation, ServiceWatcher, WantRecord,
-    WantSettlement,
+    Awaiting, CapacityAnswerer, ForeignObject, Object, Record, Released, Revocation,
+    ServiceWatcher, WantRecord, WantSettlement, address_of,
 };
 use crate::core::{Answer, FailureKind, Handle, WantOptions};
 use crate::handles::HandleKind;
@@ -64,7 +65,7 @@ impl Want {
         let Some(want) = self.want else {
             return Err(Answer::Absent);
         };
-        let state = &self.context.inner.state;
+        let state = self.context.inner.link.local("a want")?;
         let ended = state.call(&self.context.inner, |hold| {
             hold.unregister(want)?;
             Ok(state.handles.end(want))
@@ -89,7 +90,7 @@ impl Watching {
 
     /// Stops the watch; it hears nothing after.
     pub fn stop(&self) -> Result<(), Answer> {
-        let state = &self.context.inner.state;
+        let state = self.context.inner.link.local("a watch")?;
         state.call(&self.context.inner, |hold| {
             hold.unregister(self.watch)?;
             state.handles.end(self.watch);
@@ -117,7 +118,10 @@ impl ServiceRegistration {
 
     /// Unregisters the service, running `unregistered` under the layer lock once the core answered it.
     pub(crate) fn unregister_then(&self, unregistered: impl FnOnce()) -> Result<(), Answer> {
-        let state = &self.context.inner.state;
+        let state = match &self.context.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => return seam.unregister(self.registration),
+        };
         state.call(&self.context.inner, |hold| {
             hold.unregister(self.registration)?;
             state.handles.end(self.registration);
@@ -131,7 +135,16 @@ impl Context {
     /// The provider's own object registered under `id` now, if this plugin may reach it: [`Answer::Absent`] when
     /// nothing is registered there, which is no refusal, and the core's refusal when it refuses the get.
     pub fn get(&self, id: &str) -> Result<Object, Answer> {
-        let state = &self.inner.state;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => {
+                let address = seam.get(id)?;
+                return Ok(self
+                    .inner
+                    .crossed_at(address)
+                    .unwrap_or_else(|| Arc::new(ForeignObject::at(address))));
+            }
+        };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let found = state.call(&self.inner, |hold| {
@@ -154,7 +167,8 @@ impl Context {
     pub fn ids(&self) -> Result<Vec<String>, Answer> {
         let plugin = self.plugin();
         self.inner
-            .state
+            .link
+            .local("listing the service ids")?
             .call(&self.inner, |hold| hold.service_ids(plugin))
     }
 
@@ -168,7 +182,10 @@ impl Context {
         });
         let want = self.make_want(id, limits, &record);
         if let Err(answer) = &want {
-            self.inner.state.settle_later(record, Err(answer.clone()));
+            match &self.inner.link {
+                Link::Local(state) => state.settle_later(record, Err(answer.clone())),
+                Link::Seam(_) => record.settle(Err(answer.clone())),
+            }
         }
         Want {
             context: self.clone(),
@@ -183,7 +200,7 @@ impl Context {
         limits: WantLimits,
         record: &Arc<WantRecord>,
     ) -> Result<Handle, Answer> {
-        let state = &self.inner.state;
+        let state = self.inner.link.local("a want")?;
         if self.is_detached() {
             return Err(Answer::Detached);
         }
@@ -214,7 +231,7 @@ impl Context {
         if !limits.needs_the_time() {
             return Ok(WantOptions::default());
         }
-        let now = self.inner.state.timer.time().ok_or_else(|| {
+        let now = self.inner.link.local("a want")?.timer.time().ok_or_else(|| {
             Answer::Mistake(
                 "a want with a timeout, a budget or a poll interval needs the time, and the host's scheduler has no clock"
                     .to_owned(),
@@ -233,7 +250,7 @@ impl Context {
     /// Watches `id`: every later registration the core reports for it is heard with the provider's own object, and
     /// every unregistration with nothing, until the watch stops.
     pub fn watch(&self, id: &str, watcher: Arc<dyn ServiceWatcher>) -> Result<Watching, Answer> {
-        let state = &self.inner.state;
+        let state = self.inner.link.local("a watch")?;
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let watch = state.call(&self.inner, |hold| {
@@ -303,7 +320,13 @@ impl Context {
     /// that awaits no release, or one this plugin let go of already or was released or forgotten since; the core's
     /// refusal.
     pub fn release_holding(&self, revocation: &Revocation) -> Result<bool, Answer> {
-        let state = &self.inner.state;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) if revocation.awaits_release => {
+                return seam.release_holding(revocation.registration);
+            }
+            Link::Seam(_) => return Ok(false),
+        };
         if !revocation.awaits_release
             || !state.releases.take_revoked(
                 self.plugin(),
@@ -332,7 +355,20 @@ impl Context {
             guard,
             registered,
         } = registering;
-        let state = &self.inner.state;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => {
+                if answerer.is_some() {
+                    return Err(not_carried("a capacity answerer"));
+                }
+                let registration = seam.register(id, address_of(&service), awaiting.is_some())?;
+                self.inner.keep_crossed(service);
+                return Ok(ServiceRegistration {
+                    context: self.clone(),
+                    registration,
+                });
+            }
+        };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let registration = state.call(&self.inner, |hold| {

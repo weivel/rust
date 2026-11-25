@@ -164,7 +164,7 @@ impl Contexts {
     /// layer lock, with no reason of the crate's, ending its entries once the quarantine's own events are dispatched.
     pub fn verify(&self, context: &Context) -> Result<Verification, Answer> {
         let ended = context.clone();
-        let handles = self.state.handles.clone();
+        let state = self.state.clone();
         self.state.call(&context.inner, |hold| {
             let refusal = match hold.verify_activation(context.plugin()) {
                 Ok(()) => return Ok(Verification::Verified),
@@ -180,7 +180,7 @@ impl Contexts {
             };
             hold.quarantine_plugin(context.plugin(), None)
                 .map_err(|_| verification_refused)?;
-            hold.defer(Box::new(move |_| end_entries(&handles, &ended)));
+            hold.defer(Box::new(move |_| end_entries(&state, &ended)));
             Ok(Verification::Quarantined(refusal))
         })
     }
@@ -188,10 +188,10 @@ impl Contexts {
     /// Releases the plugin in the core and ends its entries once the release's own events have been dispatched.
     pub fn release(&self, context: &Context) -> Result<(), Answer> {
         let ended = context.clone();
-        let handles = self.state.handles.clone();
+        let state = self.state.clone();
         self.state.call(&context.inner, |hold| {
             hold.release_plugin(context.plugin())?;
-            hold.defer(Box::new(move |_| end_entries(&handles, &ended)));
+            hold.defer(Box::new(move |_| end_entries(&state, &ended)));
             Ok(())
         })
     }
@@ -204,10 +204,10 @@ impl Contexts {
         reason: Option<&QuarantineReason>,
     ) -> Result<(), Answer> {
         let ended = context.clone();
-        let handles = self.state.handles.clone();
+        let state = self.state.clone();
         self.state.call(&context.inner, |hold| {
             hold.quarantine_plugin(context.plugin(), reason)?;
-            hold.defer(Box::new(move |_| end_entries(&handles, &ended)));
+            hold.defer(Box::new(move |_| end_entries(&state, &ended)));
             Ok(())
         })
     }
@@ -216,11 +216,11 @@ impl Contexts {
     /// through it reaches the core after; its entries end once every event drained before the forget is dispatched.
     pub fn forget(&self, context: &Context) -> Result<(), Answer> {
         let ended = context.clone();
-        let handles = self.state.handles.clone();
+        let state = self.state.clone();
         self.state.call(&context.inner, |hold| {
             hold.forget_plugin(context.plugin())?;
             context.detach();
-            hold.defer(Box::new(move |_| end_forgotten(&handles, &ended)));
+            hold.defer(Box::new(move |_| end_forgotten(&state, &ended)));
             Ok(())
         })
     }
@@ -278,24 +278,19 @@ impl Drop for Contexts {
 /// Ends the plugin's watches, registrations and implementations in the crate's table once the core released or
 /// quarantined it and the events that call queued have been dispatched, calling nothing in the core, which ended them
 /// already. A want is left to its settlement, which the core always makes.
-fn end_entries(handles: &Table, context: &Context) {
+fn end_entries(state: &ContextState, context: &Context) {
     context.silence();
-    handles.end_owned(context.plugin(), ENDED_WITH_THE_PLUGIN);
-    context
-        .inner
-        .state
-        .releases
-        .drop_revoked_of(context.plugin());
+    state
+        .handles
+        .end_owned(context.plugin(), ENDED_WITH_THE_PLUGIN);
+    state.releases.drop_revoked_of(context.plugin());
     context.drop_listeners();
 }
 
-fn end_forgotten(handles: &Table, context: &Context) {
+fn end_forgotten(state: &ContextState, context: &Context) {
+    let handles = &state.handles;
     handles.end_owned(context.plugin(), ENDED_WITH_THE_PLUGIN);
-    context
-        .inner
-        .state
-        .releases
-        .drop_revoked_of(context.plugin());
+    state.releases.drop_revoked_of(context.plugin());
     handles.end(context.plugin());
     handles.drop_holdings(context.plugin());
     context.drop_listeners();

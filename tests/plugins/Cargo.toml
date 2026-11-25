@@ -1,0 +1,18 @@
+[package]
+name = "weivel-test-plugins"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "The test plugins the suite loads across the plugin seam, built as one library of their own."
+license = "MIT"
+publish = false
+
+[lib]
+name = "weivel_test_plugins"
+path = "lib.rs"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+weivel-rust = { path = "../.." }

@@ -8,6 +8,7 @@
 
 mod capabilities;
 mod contexts;
+mod link;
 mod log;
 mod pending;
 mod plugin;
@@ -17,6 +18,7 @@ mod services;
 mod state;
 
 pub use contexts::{Contexts, Verification};
+pub(crate) use link::SeamCalls;
 pub use log::{HostLog, LogRecord, PluginLog};
 pub use pending::{Pending, Settle, pending};
 pub use plugin::{Context, Listening};

@@ -1,6 +1,7 @@
 //! Builds the native siblings the tests load, with CMake in Release, and gathers what they built into `build/native`:
-//! the core's shared library and its `echo` test library, the standard's shared library, and the core's and the
-//! standard's `layouts` programs.
+//! the core's shared library and its `echo` test library, the standard's shared library and its `described` test
+//! library, and the core's and the standard's `layouts` programs; then builds the test plugins the suite loads across
+//! the plugin seam with Cargo, and gathers their library there too.
 
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 use std::fs;
@@ -54,6 +55,7 @@ fn native_siblings() -> Vec<NativeSibling> {
             sibling: "standard",
             targets: vec![
                 shared_library("weivel_standard_shared", "weivel_standard"),
+                shared_library("weivel_standard_described", "weivel_standard_described"),
                 program("layouts", "standard-layouts"),
             ],
             needs_the_core_source: true,
@@ -173,6 +175,39 @@ fn build_sibling(root: &Path, sibling: &NativeSibling, gathered: &Path) -> Resul
     Ok(())
 }
 
+/// Where Cargo writes what it builds: `CARGO_TARGET_DIR`, read against the repository's root when relative, or the
+/// workspace's `target`.
+fn cargo_target_directory(root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(directory) => root.join(directory),
+        None => root.join("target"),
+    }
+}
+
+fn build_the_test_plugins(root: &Path, gathered: &Path) -> Result<(), String> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .current_dir(root)
+        .args(["build", "--package", "weivel-test-plugins"])
+        .status()
+        .map_err(|error| format!("cargo could not be started: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "cargo build --package weivel-test-plugins failed: {status}"
+        ));
+    }
+    let file_name = format!("{DLL_PREFIX}weivel_test_plugins{DLL_SUFFIX}");
+    let from = cargo_target_directory(root).join("debug").join(&file_name);
+    let to = gathered.join(&file_name);
+    fs::copy(&from, &to).map(|_| ()).map_err(|error| {
+        format!(
+            "{} could not be copied to {}: {error}",
+            from.display(),
+            to.display()
+        )
+    })
+}
+
 fn build_everything() -> Result<(), String> {
     let root = repository_root();
     let gathered = root.join("build").join("native");
@@ -180,7 +215,8 @@ fn build_everything() -> Result<(), String> {
         .map_err(|error| format!("{} could not be made: {error}", gathered.display()))?;
     native_siblings()
         .iter()
-        .try_for_each(|sibling| build_sibling(&root, sibling, &gathered))
+        .try_for_each(|sibling| build_sibling(&root, sibling, &gathered))?;
+    build_the_test_plugins(&root, &gathered)
 }
 
 fn main() -> ExitCode {
