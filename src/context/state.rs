@@ -24,8 +24,14 @@ pub(crate) struct ContextState {
     pub(crate) timer: Arc<CoreTimer>,
     pub(crate) host_log: Arc<dyn HostLog>,
     pub(crate) releases: Releases,
-    /// The operations each published contract asks of an implementation, by its capability id.
-    pub(crate) contracts: Mutex<BTreeMap<String, Vec<String>>>,
+    /// Each published contract, by its capability id.
+    pub(crate) contracts: Mutex<BTreeMap<String, Contract>>,
+}
+
+/// A contract a loaded library publishes: the operations it asks of an implementation and the enums it lists.
+pub(crate) struct Contract {
+    pub(crate) operations: Vec<String>,
+    pub(crate) enums: super::DescribedEnums,
 }
 
 /// What a registration's object is to one plugin reaching it.
@@ -108,12 +114,21 @@ impl ContextState {
             .contracts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let operations = contracts.get(capability)?;
+        let operations = &contracts.get(capability)?.operations;
         let offered = offered_operations(implementation);
         operations
             .iter()
             .find(|operation| !offered.contains(operation))
             .cloned()
+    }
+
+    /// The enums the contract published for `capability` lists.
+    pub(crate) fn contract_enums(&self, capability: &str) -> Option<super::DescribedEnums> {
+        self.contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(capability)
+            .map(|contract| contract.enums.clone())
     }
 
     pub(crate) fn object_of_implementation(&self, implementation: Handle) -> Option<super::Object> {

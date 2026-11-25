@@ -18,6 +18,7 @@ use super::abi::{
     SeamTexts, SeamWantLimits, carries, copy_table, failure_kind_code, lend_answered, lend_numbers,
     lend_texts, read_answered, read_manifest, read_numbers, read_refusal, size_of_table,
 };
+use super::abi::{CONTEXT_CAPABILITY_ENUMS_END, enums_of_texts};
 use super::locked;
 use super::threads::PluginThreads;
 use super::trees::{answering_of, decode};
@@ -509,6 +510,18 @@ impl SeamCalls for HostTable {
                 })
             })
             .collect())
+    }
+
+    fn capability_enums(&self, id: &str) -> Option<crate::context::DescribedEnums> {
+        let capability_enums = self
+            .table
+            .capability_enums
+            .filter(|_| carries(self.table.size, CONTEXT_CAPABILITY_ENUMS_END))?;
+        // SAFETY: every argument lives for the call.
+        let answered = self
+            .call(|table, answer| unsafe { capability_enums(table.data, SeamText::of(id), answer) })
+            .ok()?;
+        enums_of_texts(answered.texts)
     }
 
     fn write(&self, level: LogLevel, text: &str) {

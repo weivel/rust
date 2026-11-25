@@ -215,6 +215,25 @@ fn the_typed_services_reach_a_scope_the_stub_host_opens() {
         config.get("seen"),
         Ok(Some(Setting::Text("yes".to_owned())))
     );
+    let mut every = config.all().expect("every setting is answered");
+    every.sort_by(|first, second| first.0.cmp(&second.0));
+    assert_eq!(
+        every,
+        [
+            ("count".to_owned(), Setting::Number(3.0)),
+            ("greeting".to_owned(), Setting::Text("hello".to_owned())),
+            ("on".to_owned(), Setting::Boolean(true)),
+            ("seen".to_owned(), Setting::Text("yes".to_owned())),
+        ]
+    );
+    let no_file = config.settings_file();
+    assert!(
+        matches!(&no_file, Ok(None))
+            || no_file
+                .as_ref()
+                .is_err_and(|refused| refused.is_callers_mistake()),
+        "{no_file:?}"
+    );
     let not_offered = config.get_tree("greeting");
     assert!(
         not_offered

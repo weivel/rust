@@ -11,6 +11,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use super::abi::enum_texts;
 use super::abi::{
     ANSWER_FIRST_SHAPE, Answering, ENTRY_CALL_END, ENTRY_FIRST_SHAPE, EVENT_CAPABILITY_PROVIDED,
     EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING,
@@ -621,6 +622,7 @@ fn context_table(boxed: &ContextBox) -> SeamContext {
         hold: Some(context_hold),
         unhold: Some(context_unhold),
         offer_methods: Some(context_offer_methods),
+        capability_enums: Some(context_capability_enums),
     }
 }
 
@@ -1224,6 +1226,20 @@ unsafe extern "C" fn context_provide(
             .context
             .provide(&unsafe { text(id) }, boxed.foreign(address))?;
         done()
+    });
+}
+
+unsafe extern "C" fn context_capability_enums(data: u64, id: SeamText, answer: *const SeamAnswer) {
+    answered(data, answer, |boxed| {
+        // SAFETY: the id is lent for the call.
+        let enums = boxed
+            .context
+            .capability_enums(&unsafe { text(id) })
+            .ok_or(Answer::Absent)?;
+        Ok(Answering {
+            texts: enum_texts(&enums),
+            ..Answering::default()
+        })
     });
 }
 

@@ -237,6 +237,7 @@ fn host_context_table(size: u32) -> SeamContext {
         hold: Some(hold),
         unhold: Some(unhold),
         offer_methods: None,
+        capability_enums: None,
     }
 }
 

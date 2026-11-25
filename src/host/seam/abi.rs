@@ -166,6 +166,9 @@ pub struct SeamContext {
     /// registered or provided, so the host's object for it calls them back across the seam by name.
     pub(super) offer_methods:
         Option<unsafe extern "C" fn(u64, usize, SeamTexts, *const SeamAnswer)>,
+    /// Appended: answers the enums of the contract a loaded library publishes for a capability as texts, each enum its
+    /// name, its entry count, then each entry's name and number; absent for no contract.
+    pub(super) capability_enums: Option<unsafe extern "C" fn(u64, SeamText, *const SeamAnswer)>,
 }
 
 /// What the host hands an activate or a deactivate to finish it with: `data` the host's id for it, so a finish after
@@ -282,6 +285,38 @@ macro_rules! first_shape {
 pub(super) const ENTRY_FIRST_SHAPE: usize = first_shape!(SeamEntry, free);
 pub(super) const ENTRY_CALL_END: usize = first_shape!(SeamEntry, call);
 pub(super) const CONTEXT_OFFER_METHODS_END: usize = first_shape!(SeamContext, offer_methods);
+pub(super) const CONTEXT_CAPABILITY_ENUMS_END: usize = first_shape!(SeamContext, capability_enums);
+
+/// Enums as the seam's texts carry them: each enum's name, its entry count, then each entry's name and number.
+pub(super) fn enum_texts(enums: &crate::context::DescribedEnums) -> Vec<String> {
+    let mut texts = Vec::new();
+    for name in enums.names() {
+        let entries = enums.entries(name).cloned().unwrap_or_default();
+        texts.push(name.to_owned());
+        texts.push(entries.len().to_string());
+        for (entry, number) in entries {
+            texts.push(entry);
+            texts.push(number.to_string());
+        }
+    }
+    texts
+}
+
+/// Enums read back from the seam's texts, none for texts not in that form.
+pub(super) fn enums_of_texts(texts: Vec<String>) -> Option<crate::context::DescribedEnums> {
+    let mut words = texts.into_iter();
+    let mut enums = std::collections::BTreeMap::new();
+    while let Some(name) = words.next() {
+        let count: usize = words.next()?.parse().ok()?;
+        let mut entries = std::collections::BTreeMap::new();
+        for _ in 0..count {
+            let entry = words.next()?;
+            entries.insert(entry, words.next()?.parse().ok()?);
+        }
+        enums.insert(name, entries);
+    }
+    Some(crate::context::DescribedEnums::new(enums))
+}
 pub(super) const CONTEXT_FIRST_SHAPE: usize = first_shape!(SeamContext, dispatches_here);
 pub(super) const COMPLETION_FIRST_SHAPE: usize = first_shape!(SeamCompletion, finish);
 pub(super) const EVENT_FIRST_SHAPE: usize = first_shape!(SeamEvent, settlement);

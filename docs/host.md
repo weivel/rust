@@ -67,14 +67,16 @@ same way but registers none of the ids it names, so only its caller reaches them
 or `LoadedLibrary::services`, as a host program binds `weivel.host` and `weivel.scope` for itself. An id declared
 twice, or registered under the host already by a plugin, another live library or the host itself, refuses the load.
 
-Each contract a declaration publishes is checked by the host's description check and published to the plugins'
-contexts until the library's unload, and a declaration of contracts alone registers nothing. A plugin's provide of a
-capability whose contract is published is refused before the core is asked, as `Answer::ContractMismatch`, code
-`contract-mismatch`, naming the first operation the contract's description lists that the implementation does not
-offer, a release, an operation answering nothing, never being one to offer. The operations an implementation offers
-are a `Methods`'s names or a `BoundDefinition`'s operations; one offering more is accepted, and a provide of a
-capability no live library publishes a contract for is never checked. A contract published for a capability another
-live library publishes one for refuses the load.
+Each contract a declaration publishes is checked by the host's description check and published to the plugins' contexts
+until the library's unload, and a declaration of contracts alone registers nothing. A plugin's provide of a capability
+whose contract is published is refused before the core is asked, as `Answer::ContractMismatch`, code
+`contract-mismatch`, naming the first operation the contract's description lists that the implementation does not offer,
+a release, an operation answering nothing, never being one to offer. The operations an implementation offers are a
+`Methods`'s names or a `BoundDefinition`'s operations; one offering more is accepted, and a provide of a capability no
+live library publishes a contract for is never checked. The enums a contract's description lists are published with it,
+and `Context::capability_enums` answers them by name, as `Context::enums_of` answers a described definition's, to a
+plugin in process or across the seam alike. A contract published for a capability another live library publishes one for
+refuses the load.
 
 `Host::unload_library` releases every handle its bound definitions answered and every answer carrying a definition
 that nobody released, while the binary is still mapped, closes the library to calls at once, so a later call through its bytes service answers

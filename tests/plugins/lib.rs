@@ -457,6 +457,32 @@ impl Entry for ConfigKeeping {
     }
 }
 
+/// Reads the enums of the contract published for `described.mirroring` through its context, when its action `shade`
+/// runs.
+#[derive(Default)]
+pub struct ContractEnumsReading {
+    context: Arc<Mutex<Option<Context>>>,
+}
+
+impl Entry for ContractEnumsReading {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        *self.context.lock().unwrap() = Some(context.clone());
+        finished(Ok(()))
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        let context = self.context.clone();
+        weivel_rust::host::Methods::new().with("shade", move |_| {
+            let context = context.lock().unwrap().clone().ok_or("not activated")?;
+            Ok(context
+                .capability_enums("described.mirroring")
+                .and_then(|enums| enums.number("described_shade", "DESCRIBED_SHADE_DARK"))
+                .map(|number| weivel_rust::host::Tree::Number(f64::from(number))))
+        })
+    }
+}
+
+weivel_rust::export_entry!(contract_enums_entry, ContractEnumsReading::default());
 weivel_rust::export_entry!(config_keeping_entry, ConfigKeeping::default());
 weivel_rust::export_entry!(methods_entry, MethodsProviding::default());
 weivel_rust::export_entry!(host_vector_entry, HostVectorPlugin::default());
