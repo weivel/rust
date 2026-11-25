@@ -12,6 +12,11 @@ refusal of the core is answered as the core gave it, never as an empty answer, a
 questions with no live attributes and that it serves everyone. What a plugin's listener, watcher or answerer panics
 with goes to the error sink and every other still hears each change.
 
+A plugin reads the enums of a definition a description bound through its context: `enums_of` answers the
+`DescribedEnums` of a `BoundDefinition`, each enum by the name its header spells, `weivel_status` beside them, and none
+for any other object, and `require_enums` answers exactly the enums and entries a plugin names, the caller's mistake for
+the first one the description lacks, as [descriptions.md](descriptions.md) states.
+
 A want answers a `Pending`, a result that comes later on `std` alone: it is a `Future`, it can be waited for with a
 blocking `wait`, and it takes a callback, so any runtime and plain threads all use it. A want settles once, from a
 dispatch step and never inside the call that made it, with the provider's object or the core's refusal; a want that

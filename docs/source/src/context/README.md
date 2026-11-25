@@ -3,6 +3,7 @@ The `context` module: a plugin's context and every call it makes, the records th
 <!-- generated: source-children -->
 - [capabilities.rs](../../../../src/context/capabilities.rs) - a context's calls about capabilities: provide, list and watch
 - [contexts.rs](../../../../src/context/contexts.rs) - the surface a host builds, opens, verifies, releases, quarantines and forgets contexts through
+- [enums.rs](../../../../src/context/enums.rs) - `DescribedEnums`: a description's enums by name, and the entries a plugin requires of them
 - [link.rs](../../../../src/context/link.rs) - what a context reaches the core through: the host's own contexts, or the host's context table across the plugin seam
 - [log.rs](../../../../src/context/log.rs) - the host's log and a plugin's log
 - [mod.rs](../../../../src/context/mod.rs) - the module's public surface
