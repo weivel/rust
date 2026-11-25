@@ -5,6 +5,8 @@ The crate's tests, one test target per module, each a folder Cargo builds from i
 - [context/](context/) - the `context` module's tests, among them four threads calling while a fifth dispatches
 - [core/](core/) - the `core` module's tests
 - [handles/](handles/) - the `handles` module's tests
+- [host/](host/) - the `host` module's tests: the plugin seam, C libraries, and the races of a release, a settling and the destroy
+- [plugins/](plugins/) - the test plugins the suite loads across the plugin seam, one `cdylib`
 - [support/](support/) - the helpers every test target includes
 - [timer/](timer/) - the `timer` module's tests
 <!-- end generated -->

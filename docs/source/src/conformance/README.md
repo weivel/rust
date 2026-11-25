@@ -3,6 +3,8 @@ The `conformance` module: the driver for the layer suite, reading the kit's vect
 <!-- generated: source-children -->
 - [consume.rs](../../../../src/conformance/consume.rs) - a `consume` vector driven through contexts and the host
 - [driver.rs](../../../../src/conformance/driver.rs) - reading the kit's layer vectors and running one through a host of its own
+- [echo.rs](../../../../src/conformance/echo.rs) - the suite's own reading of the core's `echo` test library: its definition laid out by hand, called through the address the host registered
+- [library.rs](../../../../src/conformance/library.rs) - a `library` vector: the `echo` library loaded through the host, holders and owners opened in flight, and each step on the suite's thread
 - [lifecycle.rs](../../../../src/conformance/lifecycle.rs) - a `lifecycle` vector: entries that run and trace their actions, and the host's steps
 - [mod.rs](../../../../src/conformance/mod.rs) - the module's public surface
 - [observations.rs](../../../../src/conformance/observations.rs) - a run answered in the shape of its vector's `then`, and a refusal as the kit writes it
