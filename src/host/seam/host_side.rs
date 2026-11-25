@@ -12,15 +12,16 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use super::abi::{
-    ANSWER_FIRST_SHAPE, Answering, ENTRY_FIRST_SHAPE, EVENT_CAPABILITY_PROVIDED,
+    ANSWER_FIRST_SHAPE, Answering, ENTRY_CALL_END, ENTRY_FIRST_SHAPE, EVENT_CAPABILITY_PROVIDED,
     EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING,
     EVENT_REACH_REFUSED, EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED,
     EVENT_WATCH_UNREGISTERED, LentManifest, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion,
-    SeamContext, SeamEntry, SeamEvent, SeamNumber, SeamText, SeamWantLimits,
-    WANT_LIMITS_FIRST_SHAPE, carries, failure_kind_of, lend_answered, lend_numbers, lend_refusal,
-    read_numbers, size_of_table,
+    SeamContext, SeamEntry, SeamEvent, SeamNumber, SeamText, SeamTexts, SeamWantLimits,
+    WANT_LIMITS_FIRST_SHAPE, answered_by, carries, copy_table, failure_kind_of, lend_answered,
+    lend_numbers, lend_refusal, read_numbers, read_texts, size_of_table,
 };
 use super::locked;
+use super::trees::{encode, result_of};
 use crate::context::{
     CapabilityWatcher, CapacityAnswerer, Context, ForeignObject, Listening, Object, Pending,
     PluginEvent, Revocation, ServiceRegistration, ServiceWatcher, Settle, Want, WantLimits,
@@ -30,8 +31,9 @@ use crate::core::binary::SharedLibrary;
 use crate::core::{
     Answer, DescribedDefinition, Handle, LibraryBinary, LogLevel, Number, Refusal, panic_text,
 };
-use crate::host::description::BoundDefinition;
+use crate::host::description::{BoundDefinition, Tree};
 use crate::host::entry::{Entry, Finished};
+use crate::host::methods::{MethodResult, Methods};
 use crate::host::state::Host;
 
 /// The entry symbol a plugin's library exports when its caller names none.
@@ -103,25 +105,7 @@ impl SeamRegistry {
         described: &DescribedDefinition,
         binary: &Arc<LibraryBinary>,
     ) {
-        let mapping = {
-            let mut mappings = locked(&self.mappings);
-            mappings.retain(|_, record| record.binary.strong_count() > 0);
-            let known = mappings
-                .iter()
-                .find(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
-                .map(|(id, _)| *id);
-            known.unwrap_or_else(|| {
-                let id = next_id();
-                mappings.insert(
-                    id,
-                    MappingRecord {
-                        binary: Arc::downgrade(binary),
-                        holds: Vec::new(),
-                    },
-                );
-                id
-            })
-        };
+        let mapping = self.mapping_of(binary);
         let mut kept = locked(&self.described);
         kept.retain(|_, (_, known)| locked(&self.mappings).contains_key(known));
         kept.insert(
@@ -130,15 +114,41 @@ impl SeamRegistry {
         );
     }
 
+    /// The id of the mapping of `binary`, made at the first definition of it that crosses.
+    fn mapping_of(&self, binary: &Arc<LibraryBinary>) -> u64 {
+        let mut mappings = locked(&self.mappings);
+        mappings.retain(|_, record| record.binary.strong_count() > 0);
+        let known = mappings
+            .iter()
+            .find(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
+            .map(|(id, _)| *id);
+        known.unwrap_or_else(|| {
+            let id = next_id();
+            mappings.insert(
+                id,
+                MappingRecord {
+                    binary: Arc::downgrade(binary),
+                    holds: Vec::new(),
+                },
+            );
+            id
+        })
+    }
+
     /// The description of `object` and the id of the library it lies in, when a description bound it; zeros otherwise.
+    /// A definition an answer carried, as a scope's are, crosses with the nested description it was bound from and
+    /// the library its carrier lies in.
     fn description_of(&self, object: &Object) -> (usize, u64) {
         let Some(bound) = object.downcast_ref::<BoundDefinition>() else {
             return (0, 0);
         };
-        locked(&self.described)
-            .get(&bound.address())
-            .copied()
-            .unwrap_or((0, 0))
+        if let Some(known) = locked(&self.described).get(&bound.address()).copied() {
+            return known;
+        }
+        match bound.library() {
+            Some(binary) => (bound.description_address(), self.mapping_of(&binary)),
+            None => (0, 0),
+        }
     }
 
     fn hold(&self, mapping: u64) -> bool {
@@ -302,6 +312,69 @@ impl EntryHandle {
         // SAFETY: the event lives for the call; the plugin's side catches every panic.
         unsafe { (self.table.hear)(self.table.data, event) };
     }
+
+    /// Whether the plugin's table carries the calls of methods by name, appended after its first shape.
+    fn calls_methods(&self) -> bool {
+        carries(self.table.size, ENTRY_CALL_END)
+    }
+
+    /// The names of the entry's actions, none for a table that carries no calls of methods.
+    fn action_names(&self) -> Vec<String> {
+        let Some(action_names) = self.table.action_names.filter(|_| self.calls_methods()) else {
+            return Vec::new();
+        };
+        // SAFETY: the answer lives for the call; the plugin's side catches every panic.
+        answered_by(|answer| unsafe { action_names(self.table.data, answer) })
+            .map(|answered| answered.texts)
+            .unwrap_or_default()
+    }
+
+    /// Calls the method `name` of the plugin's object at `address`, through the context `context`, or of the entry's
+    /// actions for address 0.
+    fn call(
+        &self,
+        context: u64,
+        address: usize,
+        name: &str,
+        arguments: Option<&Tree>,
+    ) -> MethodResult {
+        let Some(call) = self.table.call.filter(|_| self.calls_methods()) else {
+            return Err(format!(
+                "the plugin's entry table carries no calls of methods, so {name} cannot be called"
+            ));
+        };
+        let bytes = arguments.map(encode).unwrap_or_default();
+        // SAFETY: the name, the bytes and the answer live for the call; the plugin's side catches every panic.
+        let answered = answered_by(|answer| unsafe {
+            call(
+                self.table.data,
+                context,
+                address,
+                SeamText::of(name),
+                bytes.as_ptr(),
+                bytes.len(),
+                u32::from(arguments.is_some()),
+                answer,
+            )
+        });
+        result_of(answered, name)
+    }
+}
+
+/// Methods named by the plugin, each calling back across the seam to the plugin's object at `address`.
+fn methods_across(
+    entry: &Arc<EntryHandle>,
+    context: u64,
+    address: usize,
+    names: Vec<String>,
+) -> Methods {
+    names.into_iter().fold(Methods::new(), |methods, name| {
+        let entry = entry.clone();
+        let called = name.clone();
+        methods.with(name, move |arguments| {
+            entry.call(context, address, &called, arguments)
+        })
+    })
 }
 
 /// What the host keeps of one plugin across the seam, found by its id from every call of its context table.
@@ -315,6 +388,22 @@ struct ContextBox {
     watches: Mutex<HashMap<u64, Option<Watching>>>,
     revocations: Mutex<HashMap<u64, Revocation>>,
     forwarding: Mutex<Option<Listening>>,
+    /// The methods the plugin said each of its objects offers, by the object's address.
+    offered_methods: Mutex<HashMap<usize, Vec<String>>>,
+}
+
+impl ContextBox {
+    /// The host's object for the plugin's object at `address`: its address, and the methods the plugin said it
+    /// offers, each calling back across the seam.
+    fn foreign(&self, address: usize) -> Object {
+        match locked(&self.offered_methods).get(&address) {
+            Some(names) => Arc::new(ForeignObject::offering(
+                address,
+                methods_across(&self.entry, self.id, address, names.clone()),
+            )),
+            None => foreign(address),
+        }
+    }
 }
 
 impl ContextBox {
@@ -391,8 +480,8 @@ pub(super) fn entry_table_of(table: *const SeamEntry, symbol: &str) -> Result<Se
             "the entry table {symbol} answered is {size} bytes, below the {ENTRY_FIRST_SHAPE} of its first shape"
         )));
     }
-    // SAFETY: the table reaches its first shape, which is every field this build reads.
-    Ok(unsafe { std::ptr::read(table) })
+    // SAFETY: the table reaches its first shape, and every field past it is an optional function.
+    Ok(unsafe { copy_table(table) })
 }
 
 fn box_of(id: u64) -> Option<Arc<ContextBox>> {
@@ -422,6 +511,7 @@ impl SeamEntryOf {
                     watches: Mutex::new(HashMap::new()),
                     revocations: Mutex::new(HashMap::new()),
                     forwarding: Mutex::new(None),
+                    offered_methods: Mutex::new(HashMap::new()),
                 })
             })
             .clone();
@@ -431,6 +521,7 @@ impl SeamEntryOf {
             std::mem::take(&mut *locked(&boxed.wants)),
             std::mem::take(&mut *locked(&boxed.watches)),
             std::mem::take(&mut *locked(&boxed.revocations)),
+            std::mem::take(&mut *locked(&boxed.offered_methods)),
         );
         drop(ended);
         let forwarding = forward_events(&boxed);
@@ -460,8 +551,9 @@ fn context_table(boxed: &ContextBox) -> SeamContext {
         provide: context_provide,
         implementations: context_implementations,
         dispatches_here: context_dispatches_here,
-        hold: context_hold,
-        unhold: context_unhold,
+        hold: Some(context_hold),
+        unhold: Some(context_unhold),
+        offer_methods: Some(context_offer_methods),
     }
 }
 
@@ -499,6 +591,11 @@ impl Entry for SeamEntryOf {
             return None;
         }
         Some(deactivating)
+    }
+
+    fn actions(&self) -> Methods {
+        let names = self.entry.action_names();
+        methods_across(&self.entry, 0, 0, names)
     }
 
     fn forgotten(&self, context: &Context) {
@@ -1006,7 +1103,7 @@ unsafe extern "C" fn context_register(
         });
         let registered = boxed.context.register_with(
             &id,
-            foreign(address),
+            boxed.foreign(address),
             crate::context::Registering {
                 answerer,
                 awaiting: (awaiting_releases != 0).then_some(None),
@@ -1058,7 +1155,21 @@ unsafe extern "C" fn context_provide(
         // SAFETY: the id is lent for the call.
         boxed
             .context
-            .provide(&unsafe { text(id) }, foreign(address))?;
+            .provide(&unsafe { text(id) }, boxed.foreign(address))?;
+        done()
+    });
+}
+
+unsafe extern "C" fn context_offer_methods(
+    data: u64,
+    address: usize,
+    names: SeamTexts,
+    answer: *const SeamAnswer,
+) {
+    answered(data, answer, |boxed| {
+        // SAFETY: the names are lent for the call.
+        let names = unsafe { read_texts(names) };
+        locked(&boxed.offered_methods).insert(address, names);
         done()
     });
 }

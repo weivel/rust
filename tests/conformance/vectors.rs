@@ -3,7 +3,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use weivel_rust::conformance::{LayerDriver, LayerVector, LayerWitness};
+use weivel_rust::conformance::{HostProgramFixtures, LayerDriver, LayerVector, LayerWitness};
 use weivel_rust::core::{FailureKind, LogLevel};
 
 use crate::support;
@@ -17,6 +17,12 @@ fn driver() -> &'static LayerDriver {
                 support::shared_library("weivel_standard_described"),
                 support::standard_descriptions(),
             )
+            .with_host_program(HostProgramFixtures {
+                stub_host: support::stub_host_library(),
+                core: support::shared_library("weivel_core"),
+                standard: support::shared_library("weivel_standard"),
+                plugins: support::shared_library("weivel_test_plugins"),
+            })
     })
 }
 
@@ -33,13 +39,19 @@ fn vector(id: &str) -> LayerVector {
         .unwrap_or_else(|| panic!("the pinned kit carries no layer vector {id}"))
 }
 
-/// Taken by each `library` and `description` vector for its whole run: a process maps a library once however often
-/// it is opened, so two runs at once would each keep the other's binary open and read the other's unloads and
-/// releases.
+/// Taken by each `library`, `description` and `host` vector for its whole run: a process maps a library once however
+/// often it is opened, so two runs at once would each keep the other's binary open and read the other's unloads and
+/// releases, and `stub-host` keeps one run at a time.
 static ONE_LIBRARY_RUN_AT_A_TIME: Mutex<()> = Mutex::new(());
 
+fn runs_alone(id: &str) -> bool {
+    ["library/", "description/", "host/"]
+        .iter()
+        .any(|directory| id.starts_with(directory))
+}
+
 fn witnessed(id: &str) -> LayerWitness {
-    let _alone = (id.starts_with("library/") || id.starts_with("description/")).then(|| {
+    let _alone = runs_alone(id).then(|| {
         ONE_LIBRARY_RUN_AT_A_TIME
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -138,6 +150,44 @@ layer_vectors! {
     a_registration_past_an_unfired_deadline_loses => "want/a-registration-past-an-unfired-deadline-loses",
     a_settled_want_disarms_the_timer => "want/a-settled-want-disarms-the-timer",
     a_timed_want_arms_the_timer_at_its_deadline => "want/a-timed-want-arms-the-timer-at-its-deadline",
+    a_library_declaring_a_standard_id_makes_the_scope_unofferable => "host/a-library-declaring-a-standard-id-makes-the-scope-unofferable",
+    a_malformed_next_ends_the_run => "host/a-malformed-next-ends-the-run",
+    a_malformed_plan_loads_none_of_its_libraries => "host/a-malformed-plan-loads-none-of-its-libraries",
+    a_method_of_a_service_no_plugin_registered_reaches_finished_as_a_failure => "host/a-method-of-a-service-no-plugin-registered-reaches-finished-as-a-failure",
+    a_method_run_whose_plugin_was_not_activated_reaches_finished_as_a_failure => "host/a-method-run-whose-plugin-was-not-activated-reaches-finished-as-a-failure",
+    a_method_the_service_does_not_offer_reaches_finished_as_a_failure => "host/a-method-the-service-does-not-offer-reaches-finished-as-a-failure",
+    a_plan_library_that_will_not_load_still_stops => "host/a-plan-library-that-will-not-load-still-stops",
+    a_plan_naming_a_method_without_a_service_is_malformed => "host/a-plan-naming-a-method-without-a-service-is-malformed",
+    a_plan_naming_a_service_without_a_method_is_malformed => "host/a-plan-naming-a-service-without-a-method-is-malformed",
+    a_plan_naming_an_empty_service_is_malformed => "host/a-plan-naming-an-empty-service-is-malformed",
+    a_plugin_is_offered_no_scope_or_host_service => "host/a-plugin-is-offered-no-scope-or-host-service",
+    a_plugin_reads_its_own_scoped_config => "host/a-plugin-reads-its-own-scoped-config",
+    a_plugin_without_a_scope_is_offered_nothing => "host/a-plugin-without-a-scope-is-offered-nothing",
+    a_refused_scope_quarantines_that_plugin_alone => "host/a-refused-scope-quarantines-that-plugin-alone",
+    a_refused_start_calls_nothing_else => "host/a-refused-start-calls-nothing-else",
+    a_refused_started_still_stops => "host/a-refused-started-still-stops",
+    a_refused_tick_still_stops => "host/a-refused-tick-still-stops",
+    a_service_another_plugin_provides_reaches_finished_as_a_failure => "host/a-service-another-plugin-provides-reaches-finished-as-a-failure",
+    a_stop_request_during_activation_waits_for_started => "host/a-stop-request-during-activation-waits-for-started",
+    a_stop_request_during_an_action_waits_for_finished => "host/a-stop-request-during-an-action-waits-for-finished",
+    a_stop_request_stops_cleanly_while_a_tick_waits => "host/a-stop-request-stops-cleanly-while-a-tick-waits",
+    a_throwing_action_reaches_finished_as_a_failure => "host/a-throwing-action-reaches-finished-as-a-failure",
+    a_throwing_method_reaches_finished_as_a_failure => "host/a-throwing-method-reaches-finished-as-a-failure",
+    an_action_answering_nothing_reaches_finished_as_none => "host/an-action-answering-nothing-reaches-finished-as-none",
+    an_action_calls_a_method_of_a_service_its_plugin_provides => "host/an-action-calls-a-method-of-a-service-its-plugin-provides",
+    an_action_named_alone_runs_the_entrys_action_beside_a_provided_service => "host/an-action-named-alone-runs-the-entrys-action-beside-a-provided-service",
+    an_action_runs_and_its_result_reaches_finished => "host/an-action-runs-and-its-result-reaches-finished",
+    an_activation_that_throws_is_told_as_failed => "host/an-activation-that-throws-is-told-as-failed",
+    an_unreadable_manifest_is_refused_and_the_rest_activate => "host/an-unreadable-manifest-is-refused-and-the-rest-activate",
+    start_hands_its_arguments_and_activates_the_plan_in_order => "host/start-hands-its-arguments-and-activates-the-plan-in-order",
+    stop_answers_the_exit_code => "host/stop-answers-the-exit-code",
+    tick_is_called_at_each_time_it_answered => "host/tick-is-called-at-each-time-it-answered",
+    a_capability_no_loaded_library_publishes_is_provided_unchecked => "host/contract/a-capability-no-loaded-library-publishes-is-provided-unchecked",
+    an_implementation_lacking_next_is_refused_at_provide => "host/contract/an-implementation-lacking-next-is-refused-at-provide",
+    an_implementation_missing_an_operation_is_refused_at_provide => "host/contract/an-implementation-missing-an-operation-is-refused-at-provide",
+    an_implementation_offering_every_operation_is_accepted => "host/contract/an-implementation-offering-every-operation-is-accepted",
+    an_implementation_offering_more_than_the_contract_is_accepted => "host/contract/an-implementation-offering-more-than-the-contract-is-accepted",
+    the_first_missing_operation_the_description_lists_is_named => "host/contract/the-first-missing-operation-the-description-lists-is-named",
 }
 
 /// Its one listener panics on every call, which is a plugin callback's failure told to the sink, and nothing else.

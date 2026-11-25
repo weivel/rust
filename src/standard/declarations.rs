@@ -1,9 +1,13 @@
 //! What the crate declares by hand of the standard's headers, described so a test can hold it to the C compiler: the
-//! layout of every struct of `description.h` and `value.h` the description binder reads and writes, and of the
-//! `weivel_standard_refusal` the description checks fill.
+//! layout of every struct of `description.h` and `value.h` the description binder reads and writes, of the
+//! `weivel_standard_refusal` the description checks fill, and of the validation and library declaration the
+//! manifest loader and the library reader fill.
 
 use std::mem::offset_of;
 
+use super::binding::{
+    DeclaredContract, DeclaredFunction, DeclaredLibrary, DeclaredService, Validation,
+};
 use super::description::StandardRefusal;
 use crate::core::declarations::{FieldLayout, StructLayout, pointee_size};
 use crate::host::description_abi as abi;
@@ -31,7 +35,30 @@ pub fn standard_struct_layouts() -> Vec<StructLayout> {
     layouts.push(named_layout!(StandardRefusal as "weivel_standard_refusal" {
         size as "size", code as "code", detail as "detail", fix as "fix", path as "path", storage as "storage",
     }));
+    layouts.extend(reader_layouts());
     layouts
+}
+
+fn reader_layouts() -> Vec<StructLayout> {
+    vec![
+        named_layout!(Validation as "weivel_standard_validation" {
+            size as "size", valid as "valid", paths as "paths", refusal as "refusal", storage as "storage",
+        }),
+        named_layout!(DeclaredFunction as "weivel_standard_library_function" {
+            name as "name", symbol as "symbol", kind as "kind", context as "context",
+        }),
+        named_layout!(DeclaredService as "weivel_standard_library_service" {
+            id as "id", functions as "functions", function_count as "function_count",
+        }),
+        named_layout!(DeclaredContract as "weivel_standard_library_contract" {
+            capability as "capability", description as "description",
+        }),
+        named_layout!(DeclaredLibrary as "weivel_standard_library" {
+            size as "size", import_name as "import_name", version as "version", release as "release",
+            services as "services", service_count as "service_count", storage as "storage",
+            descriptions as "descriptions", contracts as "contracts", contract_count as "contract_count",
+        }),
+    ]
 }
 
 fn description_layouts() -> Vec<StructLayout> {

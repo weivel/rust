@@ -182,7 +182,7 @@ fn every_standard_struct_the_crate_declares_matches_the_compilers() {
 }
 
 #[test]
-fn the_crate_declares_every_struct_of_description_h_value_h_and_the_refusal() {
+fn the_crate_declares_every_struct_of_the_standard_it_reads_and_writes() {
     let declared: Vec<&str> = standard_struct_layouts()
         .iter()
         .map(|layout| layout.name)
@@ -199,6 +199,11 @@ fn the_crate_declares_every_struct_of_description_h_value_h_and_the_refusal() {
         "weivel_standard_entry",
         "weivel_standard_value_tree",
         "weivel_standard_refusal",
+        "weivel_standard_validation",
+        "weivel_standard_library_function",
+        "weivel_standard_library_service",
+        "weivel_standard_library_contract",
+        "weivel_standard_library",
     ];
     assert_eq!(declared, wanted);
 }

@@ -5,6 +5,7 @@ The `conformance` module: the driver for the layer suite, reading the kit's vect
 - [description.rs](../../../../src/conformance/description.rs) - a `description` vector: the `described` library loaded on the standard's check, holders opened in flight, and every call through a bound definition, its values translated by the description's kinds
 - [driver.rs](../../../../src/conformance/driver.rs) - reading the kit's layer vectors and running one through a host of its own
 - [echo.rs](../../../../src/conformance/echo.rs) - the suite's own reading of the core's `echo` test library: its definition laid out by hand, called through the address the host registered
+- [host.rs](../../../../src/conformance/host.rs) - a `host` vector: the run laid out, the crate's host program run over the kit's `stub-host` in process, the stop request sent and the record read
 - [library.rs](../../../../src/conformance/library.rs) - a `library` vector: the `echo` library loaded through the host, holders and owners opened in flight, and each step on the suite's thread
 - [lifecycle.rs](../../../../src/conformance/lifecycle.rs) - a `lifecycle` vector: entries that run and trace their actions, and the host's steps
 - [mod.rs](../../../../src/conformance/mod.rs) - the module's public surface

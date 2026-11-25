@@ -35,6 +35,20 @@ pub enum Answer {
     Mistake(String),
     /// The call was made through a context whose plugin the core has forgotten, so it never reached the core.
     Detached,
+    /// A provide refused before the core was asked: a loaded library publishes a contract for `capability`, and the
+    /// implementation does not offer `operation`, the first operation of the contract's description it lacks. Its
+    /// code is [`Answer::CONTRACT_MISMATCH`] and its subject the operation.
+    ContractMismatch {
+        /// The capability provided.
+        capability: String,
+        /// The first operation to offer that the implementation does not.
+        operation: String,
+    },
+}
+
+impl Answer {
+    /// The code of [`Answer::ContractMismatch`].
+    pub const CONTRACT_MISMATCH: &'static str = "contract-mismatch";
 }
 
 impl fmt::Display for Answer {
@@ -64,6 +78,14 @@ impl fmt::Display for Answer {
             Answer::Defect(detail) => write!(formatter, "a defect of the layer: {detail}"),
             Answer::Mistake(detail) => write!(formatter, "the caller's mistake: {detail}"),
             Answer::Detached => formatter.write_str("the context's plugin is forgotten"),
+            Answer::ContractMismatch {
+                capability,
+                operation,
+            } => write!(
+                formatter,
+                "{}: the implementation of {capability} does not offer {operation}, which its contract asks",
+                Answer::CONTRACT_MISMATCH
+            ),
         }
     }
 }

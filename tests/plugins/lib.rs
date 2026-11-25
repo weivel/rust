@@ -348,8 +348,47 @@ impl Entry for Cursoring {
     }
 }
 
+/// The plugin a `host` vector's plugin is: what it does is the vector's own words for it, which the suite writes in
+/// the run's directory, found through the run pointer file of this process.
+#[derive(Default)]
+pub struct HostVectorPlugin {
+    run: Mutex<Option<Arc<host_vector::Run>>>,
+    registrations: Mutex<Vec<weivel_rust::context::ServiceRegistration>>,
+}
+
+impl Entry for HostVectorPlugin {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let run = match host_vector::Run::of(context) {
+            Ok(run) => Arc::new(run),
+            Err(failure) => return finished(Err(failure)),
+        };
+        *self.run.lock().unwrap() = Some(run.clone());
+        for (id, methods) in run.provided() {
+            match context.register(&id, Arc::new(methods)) {
+                Ok(registration) => self.registrations.lock().unwrap().push(registration),
+                Err(refused) => {
+                    return finished(Err(format!("{id} was not registered: {refused}")));
+                }
+            }
+        }
+        let (activating, settle) = weivel_rust::context::pending();
+        std::thread::spawn(move || settle.settle(run.activate()));
+        activating
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        match self.run.lock().unwrap().as_ref() {
+            Some(run) => run.actions(),
+            None => weivel_rust::host::Methods::new(),
+        }
+    }
+}
+
 weivel_rust::export_entry!(keeping_entry, Keeping::default());
 weivel_rust::export_entry!(late_entry, LateDeactivating);
 weivel_rust::export_entry!(stashing_entry, Stashing);
 weivel_rust::export_entry!(stash_calling_entry, StashCalling);
 weivel_rust::export_entry!(cursoring_entry, Cursoring::default());
+weivel_rust::export_entry!(host_vector_entry, HostVectorPlugin::default());
+
+mod host_vector;

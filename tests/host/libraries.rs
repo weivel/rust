@@ -157,17 +157,28 @@ fn a_description_on_a_host_given_no_check_fails_the_load() {
     host.destroy().wait();
 }
 
-#[test]
-fn a_library_of_contracts_alone_loads_and_registers_nothing() {
-    let _turn = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+fn contracts_only() -> LibraryDeclaration {
     let mut contracts_only = declaration("described", Vec::new());
     contracts_only.contracts = vec![LibraryContract {
         capability: "described.mirroring".to_owned(),
         description: "described_mirror_description".to_owned(),
     }];
+    contracts_only
+}
+
+#[test]
+fn a_library_of_contracts_alone_loads_and_registers_nothing() {
+    let _turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (host, _) = kept_host(
+        HostScheduler::NoClock,
+        HostOptions {
+            description_check: Some(Arc::new(crate::support::standard_descriptions())),
+            ..HostOptions::default()
+        },
+    );
+    let contracts_only = contracts_only();
     let loaded = host
         .load_library(
             &shared_library("weivel_standard_described"),
@@ -177,6 +188,20 @@ fn a_library_of_contracts_alone_loads_and_registers_nothing() {
     assert!(loaded.services().is_empty());
     assert_eq!(loaded.declaration().contracts, contracts_only.contracts);
     assert_eq!(host.unload_library(&loaded), Ok(true));
+    host.destroy().wait();
+}
+
+#[test]
+fn a_contract_declared_to_a_host_given_no_description_check_fails_the_load() {
+    let _turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let loaded = host.load_library(
+        &shared_library("weivel_standard_described"),
+        &contracts_only(),
+    );
+    assert!(matches!(loaded, Err(Answer::Mistake(_))), "{loaded:?}");
     host.destroy().wait();
 }
 

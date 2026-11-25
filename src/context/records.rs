@@ -8,7 +8,7 @@ use super::Context;
 use super::pending::Settle;
 use crate::core::{Answer, Handle, Number, ReachKind, Refusal};
 use crate::handles::{Handles, Reservation};
-use crate::host::BoundDefinition;
+use crate::host::{BoundDefinition, Methods};
 
 /// A provider's own object: a service or an implementation of a capability. A consumer is handed exactly this
 /// object, never a copy or a wrapper, so identity is [`Arc::ptr_eq`].
@@ -56,21 +56,53 @@ pub struct Revocation {
 /// An address a provider in another binary or language registered as its object: a C library's definition, or the
 /// object a plugin across the plugin seam registered. Identity is the address, so two of them name one provider's
 /// object exactly when their addresses are equal. Reading through it is the reader's `unsafe`, as a C plugin's cast
-/// is, and it is valid only while what answered it keeps it so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// is, and it is valid only while what answered it keeps it so. One that crossed the seam with the methods its
+/// plugin's object offers by name carries them, each a call back across the seam.
+#[derive(Debug, Clone)]
 pub struct ForeignObject {
     address: usize,
+    methods: Option<Methods>,
+}
+
+impl PartialEq for ForeignObject {
+    fn eq(&self, other: &ForeignObject) -> bool {
+        self.address == other.address
+    }
+}
+
+impl Eq for ForeignObject {}
+
+impl std::hash::Hash for ForeignObject {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
+    }
 }
 
 impl ForeignObject {
     /// The object at `address`.
     pub fn at(address: usize) -> ForeignObject {
-        ForeignObject { address }
+        ForeignObject {
+            address,
+            methods: None,
+        }
+    }
+
+    /// The object at `address`, offering `methods` by name.
+    pub fn offering(address: usize, methods: Methods) -> ForeignObject {
+        ForeignObject {
+            address,
+            methods: Some(methods),
+        }
     }
 
     /// Its address.
     pub fn address(&self) -> usize {
         self.address
+    }
+
+    /// The methods it offers by name, when it crossed with any.
+    pub fn methods(&self) -> Option<&Methods> {
+        self.methods.as_ref()
     }
 }
 

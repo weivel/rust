@@ -10,6 +10,7 @@ use super::records::{
     Awaiting, CapacityAnswerer, Object, Record, Released, Revocation, ServiceWatcher, WantRecord,
     WantSettlement,
 };
+use super::state::Reached;
 use crate::core::{Answer, FailureKind, Handle, WantOptions};
 use crate::handles::HandleKind;
 
@@ -149,11 +150,14 @@ impl Context {
         let plugin = self.plugin();
         let found = state.call(&self.inner, |hold| {
             let registration = hold.get_service(plugin, id)?;
-            let object = state.object_of_registration(registration);
-            if let Some(object) = &object {
-                room.hold(plugin, registration, object.clone());
+            match state.reached_by(plugin, registration) {
+                Reached::Object(object) => {
+                    room.hold(plugin, registration, object.clone());
+                    Ok(Some(object))
+                }
+                Reached::NotOffered => Err(Answer::Absent),
+                Reached::Unknown => Ok(None),
             }
-            Ok(object)
         })?;
         found.ok_or_else(|| {
             let detail =

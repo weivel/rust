@@ -58,6 +58,7 @@ mod tests {
 
     fn listing(entries: Vec<(String, u32)>) -> Description {
         Description {
+            address: 0,
             definition: "example".to_owned(),
             types: Vec::new(),
             enums: vec![Enum {

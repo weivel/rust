@@ -268,6 +268,19 @@ impl BoundDefinition {
         &self.inner.binding.blocking
     }
 
+    /// The address of the description it was bound from, while that description's library is open.
+    pub(crate) fn description_address(&self) -> usize {
+        self.inner.binding.description.address
+    }
+
+    /// The binary of the library it lies in, while that binary is open; none for one bound with no library.
+    pub(crate) fn library(&self) -> Option<Arc<crate::core::LibraryBinary>> {
+        match &self.inner.environment.mapping {
+            Mapping::Library(binary) => binary.upgrade(),
+            _ => None,
+        }
+    }
+
     /// The enums its description lists, with `weivel_status` beside them.
     pub fn enums(&self) -> &DescribedEnums {
         &self.inner.binding.enums
@@ -392,4 +405,20 @@ pub(crate) fn bind_described(
         scope: None,
     };
     Binding::new(read)?.bind(described.definition_address(), environment)
+}
+
+/// The operations a contract's description asks of an implementation, in the order it lists them: every operation
+/// but its releases, a release being one that answers nothing.
+pub(crate) fn contract_operations(described: &DescribedDefinition) -> Result<Vec<String>, String> {
+    // SAFETY: the host's description check passed the description, from a library it holds open across this read.
+    let description =
+        unsafe { reader::read(described.description_address()) }.map_err(|unreadable| {
+            format!("the contract's description cannot be read: {unreadable:?}")
+        })?;
+    Ok(description
+        .operations
+        .iter()
+        .filter(|operation| operation.returns == RETURNS_STATUS)
+        .map(|operation| operation.name.clone())
+        .collect())
 }

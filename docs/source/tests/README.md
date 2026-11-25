@@ -7,6 +7,8 @@ The crate's tests, one test target per module, each a folder Cargo builds from i
 - [handles/](handles/) - the `handles` module's tests
 - [host/](host/) - the `host` module's tests: the plugin seam, C libraries, and the races of a release, a settling and the destroy
 - [plugins/](plugins/) - the test plugins the suite loads across the plugin seam, one `cdylib`
+- [program/](program/) - the `program` module's tests: the `weivel-host` command line and a running host
+- [standard/](standard/) - the `standard` module's tests: manifests, declarations, service ids and the typed services against `stub-host`
 - [support/](support/) - the helpers every test target includes
 - [timer/](timer/) - the `timer` module's tests
 <!-- end generated -->

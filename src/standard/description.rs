@@ -133,4 +133,13 @@ impl DescriptionCheck for StandardDescriptions {
             (self.functions.answers)(description, definition, refusal)
         })
     }
+
+    fn check_contract(&self, described: &DescribedDefinition) -> Result<(), Answer> {
+        let description = described.description_address() as *const c_void;
+        // SAFETY: the address was answered by a library the host holds open across the check, and the refusal is
+        // the crate's own of its size.
+        self.run("weivel_standard_description_check", |refusal| unsafe {
+            (self.functions.check)(description, refusal)
+        })
+    }
 }

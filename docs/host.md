@@ -8,9 +8,20 @@ as the core's `docs/contract/host.md` asks of a language's `host` module. Its fi
 ## Plugins and their lifecycle
 
 A plugin's entry is an `Entry`: an `activate` taking the plugin's context and answering a `Pending` that settles once
-the activation is done, and optionally a `deactivate` answering one the same way. A panic or an error is a failed
-activation, which the host quarantines with a reason of its own; a failed deactivate goes to the error sink and the
-release goes on.
+the activation is done, and optionally a `deactivate` answering one the same way, and the `actions` it offers by
+name. A panic or an error is a failed activation, which the host quarantines with a reason of its own; a failed
+deactivate goes to the error sink and the release goes on. `Host::entry_on_disk` is the entry of a plugin built as a
+library of its own at a path: its first activate loads the library across the plugin seam, and fails, saying why,
+for a path that is not a regular file reached through no link or a library that does not load.
+
+## Methods by name
+
+Rust reflects no method of an object, so whatever is called by a name read at run time is a `Methods`: named
+functions, each taking a value tree, or none for a value of kind NONE, and answering one, none, or why it failed, a
+panic answered as a failure saying so. An entry's `actions` are a `Methods`, a service that offers methods by name
+registers a `Methods` as its object, and `methods_of` answers the methods of such an object, or of a `ForeignObject` a
+plugin across the seam registered with them. A host program's plan names an action or a method this way
+([program.md](program.md)).
 
 `Host::activate` asks the core for the plan, every service of the host's own counted as provided by the host, and
 starts each plugin in its order: builds its context, opens it and calls its activate, never waiting for one before
@@ -36,7 +47,12 @@ core and joins the system scheduler's thread when the host made one; every call 
 ## Host services and C libraries
 
 `Host::register_host_service` registers an object of the host's own under `WEIVEL_HOST`, refused as the caller's
-mistake for an id a loaded C library declares. `Host::load_library` loads a C library from a `LibraryDeclaration`,
+mistake for an id a loaded C library declares or the host offers plugins one by one. `Host::offer_to_plugin` offers
+an object to one registered plugin alone: every plugin offered an id shares one registration of the host's, which an
+activation plan counts as provided by the host, and each plugin that resolves it is answered the object offered to
+it, a plugin offered nothing under the id nothing, as the get of an unregistered id answers; the last `PluginOffer`
+of an id withdrawn unregisters the registration. `Host::service_registered_by` answers the object one plugin itself
+registered under an id, never a registration of another plugin or of the host. `Host::load_library` loads a C library from a `LibraryDeclaration`,
 which the caller builds, and the library's path. A service of bytes functions is registered as a `LibraryService`,
 whose `call` lends the input for the call and answers the library's bytes in place as `LibraryBytes`, released through
 the library's release symbol when dropped and keeping the binary open until then, so there is no copy. A definition
@@ -46,10 +62,19 @@ load as the caller's mistake. A service that declares a `description` loads only
 in `HostOptions`, which `standard::StandardDescriptions` provides: `weivel_standard_description_check`, then
 `weivel_standard_description_answers` with the definition, each refusal the caller's mistake. A described definition is
 registered awaiting releases as the `BoundDefinition` bound from its description, standing for the very address its
-symbol answered, as [descriptions.md](descriptions.md) states. A declaration of contracts alone
-loads and registers nothing; its contracts stay on the declaration, and no capability a plugin provides is checked
-against them yet. An id declared twice, or registered under the host already by a plugin, another live library or the
-host itself, refuses the load.
+symbol answered, as [descriptions.md](descriptions.md) states. `Host::load_library_withholding` loads a library the
+same way but registers none of the ids it names, so only its caller reaches them, through `LoadedLibrary::described`
+or `LoadedLibrary::services`, as a host program binds `weivel.host` and `weivel.scope` for itself. An id declared
+twice, or registered under the host already by a plugin, another live library or the host itself, refuses the load.
+
+Each contract a declaration publishes is checked by the host's description check and published to the plugins'
+contexts until the library's unload, and a declaration of contracts alone registers nothing. A plugin's provide of a
+capability whose contract is published is refused before the core is asked, as `Answer::ContractMismatch`, code
+`contract-mismatch`, naming the first operation the contract's description lists that the implementation does not
+offer, a release, an operation answering nothing, never being one to offer. The operations an implementation offers
+are a `Methods`'s names or a `BoundDefinition`'s operations; one offering more is accepted, and a provide of a
+capability no live library publishes a contract for is never checked. A contract published for a capability another
+live library publishes one for refuses the load.
 
 `Host::unload_library` releases every handle its bound definitions answered and every answer carrying a definition
 that nobody released, while the binary is still mapped, closes the library to calls at once, so a later call through its bytes service answers
@@ -79,7 +104,14 @@ operations it calls as an in-process plugin does. It crosses with the host's id 
 the library mapped through the host's context table for each call and release, as the host's own binding holds its
 library, so once the binary has closed a call through it answers unloaded rather than reaching unmapped code. Before an
 unload closes a library to calls, the host tells every plugin across the seam, which releases what its own bindings of
-that library got while it is still mapped.
+that library got while it is still mapped. A definition an answer carried, as a scope's are, crosses with the nested
+description it was bound from and the id of the library its carrier lies in.
+
+A plugin's object that is a `Methods` crosses with its names, told to the host through `offer_methods` before it is
+registered or provided, so the host's `ForeignObject` for it offers each, a call back across the seam to the plugin's
+object by its address through its context; the entry's actions cross the same way, the entry table answering their
+names and calling one. A method's arguments and its answer cross as a value tree in the seam's own encoding of bytes,
+never JSON, and a contract's refusal crosses whole, its capability and operation kept.
 
 Each table is led by its `size`. A side refuses a table below its first shape, the fields it was first published with,
 reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either

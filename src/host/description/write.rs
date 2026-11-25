@@ -229,6 +229,7 @@ impl<'a> Writer<'a> {
                 });
                 Ok(())
             }
+            (KIND_VALUE, Value::NoValue) => Ok(()),
             (scalar, value) => match scalar_slot(scalar, Some(value), &place)? {
                 // SAFETY: the element lies inside a block sized for its kind.
                 Some(slot) => unsafe { put_slot(address, scalar, slot) },
@@ -316,7 +317,7 @@ impl<'a> Writer<'a> {
                 Ok(0)
             }
             KIND_VALUE => match value {
-                None => Ok(0),
+                None | Some(Value::NoValue) => Ok(0),
                 Some(Value::Tree(tree)) => {
                     fills.push(Fill::Node {
                         address,

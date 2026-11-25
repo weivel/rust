@@ -4,9 +4,12 @@ The `host` module: registering plugins, activating them in plan order, verifying
 - [activation.rs](../../../../src/host/activation.rs) - activation in plan order, a settled activate verified or quarantined, and a verification asked for
 - [declaration.rs](../../../../src/host/declaration.rs) - a C library's declaration as a value, and what of one is the caller's mistake before anything is opened
 - [description/](description/) - described definitions: a C library's definition bound from its description, its layouts and plans built at the load
+- [disk.rs](../../../../src/host/disk.rs) - a plugin's entry on disk: the library its plan names, loaded across the plugin seam at its first activate
 - [entry.rs](../../../../src/host/entry.rs) - a plugin's `Entry`, an activation's outcomes, and the host's options
 - [libraries.rs](../../../../src/host/libraries.rs) - C libraries as host services: the load, each service registered under `WEIVEL_HOST`, the unload, and when a binary closes
+- [methods.rs](../../../../src/host/methods.rs) - `Methods`: what an object or an entry offers to be called by a name read at run time, each taking and answering a value tree
 - [mod.rs](../../../../src/host/mod.rs) - the module's public surface
+- [offers.rs](../../../../src/host/offers.rs) - services the host offers each plugin on its own, and the object one plugin itself registered
 - [release.rs](../../../../src/host/release.rs) - a release: the deactivate, the core's release, the forget and the record dropped
 - [seam/](seam/) - the plugin seam: the C tables a host and a plugin built as a library of its own reach each other through
 - [services.rs](../../../../src/host/services.rs) - a service of the host's own under `WEIVEL_HOST`, counted as provided by an activation plan

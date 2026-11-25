@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::declaration::{LibraryDeclaration, LibraryServiceDeclaration, mistake_in};
-use super::description::{Holdings, Mapping, bind_described};
+use super::description::{BoundDefinition, Holdings, Mapping, bind_described, contract_operations};
 use super::state::{Host, HostShared, change_count};
 use crate::context::{ForeignObject, Object, ServiceRegistration};
 use crate::core::{Answer, BytesFunction, FailureKind, LibraryBinary, LibraryBytes};
@@ -98,8 +98,12 @@ struct LoadedInner {
     lifetime: Arc<Lifetime>,
     /// Every handle and kept answer its bound definitions answered that nobody has released yet.
     holdings: Arc<Holdings>,
-    /// The registrations it made; `None` once an unload or the destroy took it.
-    registrations: Mutex<Option<Vec<ServiceRegistration>>>,
+    /// The ids it registers for no plugin, so only the caller that loaded it reaches them.
+    withheld: Vec<String>,
+    /// The capabilities whose contracts it published.
+    contracts: Mutex<Vec<String>>,
+    /// The registrations it made, each with its id; `None` once an unload or the destroy took it.
+    registrations: Mutex<Option<Vec<(String, ServiceRegistration)>>>,
 }
 
 /// A C library a host loaded. Cloning it shares it.
@@ -131,6 +135,17 @@ impl LoadedLibrary {
         self.inner.objects.clone()
     }
 
+    /// The definition it bound for the service `id` from the description the service declares, a withheld one
+    /// included; `None` for an id it declares no described definition under.
+    pub fn described(&self, id: &str) -> Option<BoundDefinition> {
+        self.inner
+            .objects
+            .iter()
+            .find(|(declared, _)| declared == id)
+            .and_then(|(_, object)| object.downcast_ref::<BoundDefinition>())
+            .cloned()
+    }
+
     /// Whether it declares the service `id` and has not been unloaded.
     pub(super) fn declares(&self, id: &str) -> bool {
         locked(&self.inner.registrations).is_some()
@@ -142,19 +157,23 @@ impl LoadedLibrary {
                 .any(|service| service.id == id)
     }
 
-    fn take_for_unloading(&self) -> Option<Vec<ServiceRegistration>> {
+    fn take_for_unloading(&self) -> Option<Vec<(String, ServiceRegistration)>> {
         locked(&self.inner.registrations).take()
     }
 
     /// Keeps a registration it made, answering false once an unload took it, so its caller unregisters it at once.
-    fn keep(&self, registration: ServiceRegistration) -> Result<(), ServiceRegistration> {
+    fn keep(&self, id: &str, registration: ServiceRegistration) -> Result<(), ServiceRegistration> {
         match locked(&self.inner.registrations).as_mut() {
             Some(registrations) => {
-                registrations.push(registration);
+                registrations.push((id.to_owned(), registration));
                 Ok(())
             }
             None => Err(registration),
         }
+    }
+
+    fn is_withheld(&self, id: &str) -> bool {
+        self.inner.withheld.iter().any(|withheld| withheld == id)
     }
 
     fn is_of(&self, shared: &Arc<HostShared>) -> bool {
@@ -188,13 +207,29 @@ impl Host {
         path: &Path,
         declaration: &LibraryDeclaration,
     ) -> Result<LoadedLibrary, Answer> {
+        self.load_library_withholding(path, declaration, &[])
+    }
+
+    /// Loads a C library as [`Host::load_library`] does, binding every service it declares, but registering none of
+    /// the ids `withheld` names, so only its caller reaches those, through [`LoadedLibrary::described`] or
+    /// [`LoadedLibrary::services`]. Each contract the declaration publishes, its description checked by the host's
+    /// description check, is published to the plugins' contexts until the unload, so a plugin's provide of its
+    /// capability is refused as [`Answer::ContractMismatch`] when the implementation does not offer every operation the
+    /// description lists but its releases. Answers as [`Host::load_library`] does, and [`Answer::Mistake`] for a
+    /// contract another live library publishes for the same capability.
+    pub fn load_library_withholding(
+        &self,
+        path: &Path,
+        declaration: &LibraryDeclaration,
+        withheld: &[&str],
+    ) -> Result<LoadedLibrary, Answer> {
         if self.shared.is_destroy_called() {
             return Err(Answer::Destroyed);
         }
         if let Some(mistake) = mistake_in(declaration) {
             return Err(Answer::Mistake(mistake));
         }
-        if let Some(id) = self.registered_already(declaration) {
+        if let Some(id) = self.registered_already(declaration, withheld) {
             return Err(Answer::Mistake(taken_id_text(&id)));
         }
         let binary = LibraryBinary::open(
@@ -202,9 +237,11 @@ impl Host {
             declaration.release.as_deref(),
             refused_close(&self.shared, &declaration.import_name),
         )?;
-        let library = self.built(binary, declaration)?;
+        let library = self.built(binary, declaration, withheld)?;
         self.kept(&library)?;
-        let registered = self.register_services(&library);
+        let registered = self
+            .publish_contracts(&library)
+            .and_then(|()| self.register_services(&library));
         if registered.is_err() || self.shared.is_destroy_called() {
             self.shared.unload_taken(&library);
             return Err(registered.err().unwrap_or(Answer::Destroyed));
@@ -230,10 +267,15 @@ impl Host {
         Ok(self.shared.unload_taken(library))
     }
 
-    fn registered_already(&self, declaration: &LibraryDeclaration) -> Option<String> {
+    fn registered_already(
+        &self,
+        declaration: &LibraryDeclaration,
+        withheld: &[&str],
+    ) -> Option<String> {
         declaration
             .services
             .iter()
+            .filter(|service| !withheld.contains(&service.id.as_str()))
             .find(|service| {
                 self.shared.contexts.holds_a_registration_of(&service.id)
                     || self.shared.records().is_taken(&service.id)
@@ -247,6 +289,7 @@ impl Host {
         &self,
         binary: Arc<LibraryBinary>,
         declaration: &LibraryDeclaration,
+        withheld: &[&str],
     ) -> Result<LoadedLibrary, Answer> {
         let lifetime = Arc::new(Lifetime {
             binary: Mutex::new(Some(binary.clone())),
@@ -272,9 +315,34 @@ impl Host {
                 objects,
                 lifetime,
                 holdings,
+                withheld: withheld.iter().map(|id| (*id).to_owned()).collect(),
+                contracts: Mutex::new(Vec::new()),
                 registrations: Mutex::new(Some(Vec::new())),
             }),
         })
+    }
+
+    /// Checks and reads each contract the library publishes, then publishes every one, refusing a capability whose
+    /// contract another live library publishes.
+    fn publish_contracts(&self, library: &LoadedLibrary) -> Result<(), Answer> {
+        let binary = library.inner.lifetime.binary().ok_or(Answer::Destroyed)?;
+        for contract in &library.declaration().contracts {
+            let Some(check) = &self.shared.description_check else {
+                return Err(Answer::Mistake(format!(
+                    "the contract of {} is published by its description, and the host was given no description \
+                     check to run on it: create it with HostOptions::description_check",
+                    contract.capability
+                )));
+            };
+            let described = binary.described(&contract.description, 0)?;
+            check.check_contract(&described)?;
+            let operations = contract_operations(&described).map_err(Answer::Mistake)?;
+            self.shared
+                .contexts
+                .publish_contract(&contract.capability, operations)?;
+            locked(&library.inner.contracts).push(contract.capability.clone());
+        }
+        Ok(())
     }
 
     fn definition(
@@ -328,6 +396,9 @@ impl Host {
 
     fn register_services(&self, library: &LoadedLibrary) -> Result<(), Answer> {
         for (id, object) in &library.inner.objects {
+            if library.is_withheld(id) {
+                continue;
+            }
             let registration = if object.is::<LibraryService>() {
                 self.shared.contexts.register_host_service(
                     id,
@@ -338,7 +409,7 @@ impl Host {
             } else {
                 self.register_definition(library, id, object)?
             };
-            if let Err(late) = library.keep(registration) {
+            if let Err(late) = library.keep(id, registration) {
                 self.shared.unregister(&late, id);
             }
         }
@@ -418,16 +489,18 @@ impl HostShared {
         }
         library.inner.holdings.release_all();
         library.inner.lifetime.close_to_calls();
-        let ids = library
-            .declaration()
-            .services
-            .iter()
-            .map(|service| service.id.as_str());
-        for (registration, id) in registrations.iter().zip(ids) {
+        self.withdraw_contracts(library);
+        for (id, registration) in &registrations {
             self.unregister(registration, id);
         }
         self.drop_library(library);
         true
+    }
+
+    fn withdraw_contracts(&self, library: &LoadedLibrary) {
+        for capability in std::mem::take(&mut *locked(&library.inner.contracts)) {
+            self.contexts.withdraw_contract(&capability);
+        }
     }
 
     fn unregister(&self, registration: &ServiceRegistration, id: &str) {
@@ -462,6 +535,7 @@ impl HostShared {
                 }
                 library.inner.holdings.release_all();
                 library.inner.lifetime.close_to_calls();
+                self.withdraw_contracts(&library);
             }
         }
     }

@@ -15,9 +15,15 @@ mod activation;
 mod declaration;
 mod description;
 #[forbid(unsafe_code)]
+mod disk;
+#[forbid(unsafe_code)]
 mod entry;
 #[forbid(unsafe_code)]
 mod libraries;
+#[forbid(unsafe_code)]
+mod methods;
+#[forbid(unsafe_code)]
+mod offers;
 #[forbid(unsafe_code)]
 mod release;
 mod seam;
@@ -40,6 +46,8 @@ pub use entry::{
     Outcome,
 };
 pub use libraries::{LibraryAnswer, LibraryService, LoadedLibrary};
+pub use methods::{Method, MethodResult, Methods, methods_of};
+pub use offers::PluginOffer;
 pub use seam::{
     DEFAULT_ENTRY_SYMBOL, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext,
     SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamOffer, SeamRefusal, SeamText, SeamTexts,

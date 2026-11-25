@@ -6,6 +6,7 @@ mod support;
 
 mod descriptions;
 mod libraries;
+mod offers;
 mod races;
 mod seam;
 

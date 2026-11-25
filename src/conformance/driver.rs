@@ -4,13 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::host::{self, HostProgramFixtures};
 use super::observations::observe;
 use super::shapes::{self, DriverFailure, Members};
 use super::world::DriverWorld;
 use super::{consume, description, library, lifecycle, want};
 use crate::context::LogRecord;
 use crate::core::{CoreBinary, CoreOptions, Failure};
-use crate::host::DescriptionCheck;
+use crate::host::{DescriptionCheck, Tree};
 use crate::standard::{Json, StandardDescriptions, StandardJson};
 
 /// One layer vector of the kit, as the standard's reader read it.
@@ -22,6 +23,9 @@ pub struct LayerVector {
     pub op: String,
     /// What the run is built from.
     pub given: Json,
+    /// The same, every object a record whose members keep the order the vector writes them in, which a value the
+    /// run hands on whole, such as a host plan's arguments, keeps.
+    pub given_in_order: Tree,
     /// What the run must show.
     pub then: Json,
 }
@@ -48,6 +52,7 @@ pub struct LayerDriver {
     json: StandardJson,
     echo_library: Option<PathBuf>,
     described_library: Option<(PathBuf, StandardDescriptions)>,
+    host_program: Option<HostProgramFixtures>,
 }
 
 impl LayerDriver {
@@ -58,7 +63,14 @@ impl LayerDriver {
             json,
             echo_library: None,
             described_library: None,
+            host_program: None,
         }
+    }
+
+    /// The driver, with what a `host` vector's run is made of besides the vector.
+    pub fn with_host_program(mut self, fixtures: HostProgramFixtures) -> LayerDriver {
+        self.host_program = Some(fixtures);
+        self
     }
 
     /// The driver, with the path of the core's `echo` test library a `library` vector loads.
@@ -119,6 +131,18 @@ impl LayerDriver {
             .json
             .parse(&bytes)
             .map_err(|refusal| format!("{}: {refusal}", path.display()))?;
+        let in_order = self
+            .json
+            .parse_in_order(&bytes)
+            .map_err(|refusal| format!("{}: {refusal}", path.display()))?;
+        let given_in_order = match in_order {
+            Tree::Record(members) => members
+                .into_iter()
+                .find(|(key, _)| key == "given")
+                .map(|(_, given)| given)
+                .unwrap_or(Tree::Null),
+            _ => Tree::Null,
+        };
         let place = format!("the vector {id}");
         let members = shapes::object(&place, &document)?;
         let named = shapes::text(&place, members, "id")?;
@@ -129,6 +153,7 @@ impl LayerDriver {
             id: named,
             op: shapes::text(&place, members, "op")?,
             given: shapes::member(&place, members, "given")?.clone(),
+            given_in_order,
             then: shapes::member(&place, members, "then")?.clone(),
         })
     }
@@ -139,6 +164,20 @@ impl LayerDriver {
         let place = format!("the vector {}", vector.id);
         let given = shapes::object(&format!("{place}'s given"), &vector.given)?;
         let then = shapes::object(&format!("{place}'s then"), &vector.then)?;
+        if vector.op == "host" {
+            let fixtures = self.host_program.as_ref().ok_or_else(|| {
+                format!(
+                    "the vector {} runs the host program, and the driver was given none",
+                    vector.id
+                )
+            })?;
+            return Ok(LayerWitness {
+                id: vector.id.clone(),
+                observed: host::witness(given, &vector.given_in_order, then, fixtures)?,
+                logs: Vec::new(),
+                failures: Vec::new(),
+            });
+        }
         let options = if vector.op == "want" {
             want::core_options(given)?
         } else {

@@ -186,6 +186,7 @@ pub(crate) unsafe fn read(address: usize) -> Result<Description, Unreadable> {
         )
     };
     Ok(Description {
+        address,
         // SAFETY: as for `member_of`.
         definition: unsafe { text(definition) }?,
         types: types.iter().map(type_of).collect::<Result<_, _>>()?,

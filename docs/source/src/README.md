@@ -7,6 +7,7 @@ The library, one folder per module of the contract, under the contract's names, 
 - [handles/](handles/) - the `handles` module: the table from the core's handles to the crate's records
 - [host/](host/) - the `host` module: registration, activation, verification, release and destroy, host services, C libraries and the plugin seam
 - [lib.rs](../../../src/lib.rs) - the crate root, declaring each module
-- [standard/](standard/) - the `standard` module: the standard's binary by path, so far its JSON reader and its description checks
+- [program/](program/) - the `program` module: the host program, `start_host`, `run_host` and the `weivel-host` command line
+- [standard/](standard/) - the `standard` module: the standard's binary by path, its manifests, declarations, JSON reader and description checks, and typed access to its services
 - [timer/](timer/) - the `timer` module: the scheduler, the system scheduler and the core's timer
 <!-- end generated -->

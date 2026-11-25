@@ -52,6 +52,7 @@ impl Contexts {
             timer,
             host_log,
             releases: Releases::default(),
+            contracts: Default::default(),
         });
         let routed: Weak<ContextState> = Arc::downgrade(&state);
         let routing = core.add_listener(Arc::new(move |_: &Core, event: &Event| {
@@ -116,6 +117,50 @@ impl Contexts {
                 ..Registering::default()
             },
         )
+    }
+
+    /// Publishes the contract of `capability`: from now on a plugin's provide of it is refused as
+    /// [`Answer::ContractMismatch`] when its implementation does not offer every one of `operations`. Answers
+    /// [`Answer::Mistake`] for a capability whose contract is published already.
+    pub fn publish_contract(
+        &self,
+        capability: &str,
+        operations: Vec<String>,
+    ) -> Result<(), Answer> {
+        let mut contracts = self
+            .state
+            .contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if contracts.contains_key(capability) {
+            return Err(Answer::Mistake(format!(
+                "a contract for the capability {capability} is published already"
+            )));
+        }
+        contracts.insert(capability.to_owned(), operations);
+        Ok(())
+    }
+
+    /// Withdraws the contract of `capability`, so a provide of it is checked against none.
+    pub fn withdraw_contract(&self, capability: &str) {
+        self.state
+            .contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(capability);
+    }
+
+    /// The object `plugin` itself registered under `id` and still has registered: a registration under the id by
+    /// another plugin or the host is never answered.
+    pub fn registered_by(&self, plugin: Handle, id: &str) -> Option<Object> {
+        let entry = self.state.handles.find_first(|entry| {
+            entry.owner == Some(plugin)
+                && matches!(&entry.record, Record::Service { id: registered, .. } if registered == id)
+        })?;
+        match entry.record {
+            Record::Service { object, .. } => Some(object),
+            _ => None,
+        }
     }
 
     /// Builds the context of a plugin the core registered, which hears no event drained before it was made. Answers

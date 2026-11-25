@@ -106,6 +106,8 @@ pub(super) struct HostShared {
     pub(super) records: Mutex<Records>,
     /// What the host keeps of the plugin seam, dropped with the host.
     pub(super) seam: Arc<super::seam::SeamRegistry>,
+    /// Each id offered to plugins one by one; taken before the records whenever both are.
+    pub(super) offered: Mutex<HashMap<String, super::offers::Offered>>,
 }
 
 /// Registers plugins written in Rust, activates, verifies and releases them, offers host services, loads C libraries
@@ -158,6 +160,7 @@ impl Host {
                 description_check: options.description_check.clone(),
                 records: Mutex::new(Records::default()),
                 seam: Arc::default(),
+                offered: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -305,6 +308,12 @@ impl HostShared {
 
     pub(super) fn records(&self) -> MutexGuard<'_, Records> {
         self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn offered(&self) -> MutexGuard<'_, HashMap<String, super::offers::Offered>> {
+        self.offered
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

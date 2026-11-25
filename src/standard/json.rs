@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::core::LoadFailure;
 use crate::core::binary::SharedLibrary;
+use crate::host::Tree;
 
 const DETAIL_CAPACITY: usize = 96;
 
@@ -218,6 +219,71 @@ impl StandardJson {
         // SAFETY: `root` came from the parse and is freed exactly once.
         unsafe { (functions.weivel_json_free)(root) };
         Ok(read)
+    }
+
+    /// Reads one JSON document as a value tree, each object a record whose members keep the order the document writes
+    /// them in, which a [`Json`] value does not.
+    pub fn parse_in_order(&self, text: &[u8]) -> Result<Tree, JsonRefusal> {
+        let functions = &self.loaded.functions;
+        let mut error = JsonError {
+            size: std::mem::size_of::<JsonError>() as u32,
+            line: 0,
+            column: 0,
+            message: std::ptr::null(),
+            detail: [0; DETAIL_CAPACITY],
+            out_of_memory: 0,
+        };
+        // SAFETY: as for `parse`.
+        let root =
+            unsafe { (functions.weivel_json_parse)(text.as_ptr().cast(), text.len(), &mut error) };
+        if root.is_null() {
+            return Err(refusal_of(&error));
+        }
+        // SAFETY: as for `parse`.
+        let read = unsafe { self.tree(root) };
+        // SAFETY: as for `parse`.
+        unsafe { (functions.weivel_json_free)(root) };
+        Ok(read)
+    }
+
+    /// Reads one value of a parsed document as a value tree.
+    ///
+    /// # Safety
+    /// `value` is a value of a document not yet freed.
+    unsafe fn tree(&self, value: Value) -> Tree {
+        let functions = &self.loaded.functions;
+        // SAFETY: as the caller promised, `value` lives, and each accessor reads only its own kind.
+        unsafe {
+            match (functions.weivel_json_kind_of)(value) {
+                KIND_ARRAY => {
+                    let length = (functions.weivel_json_array_length)(value);
+                    Tree::List(
+                        (0..length)
+                            .map(|index| self.tree((functions.weivel_json_array_at)(value, index)))
+                            .collect(),
+                    )
+                }
+                KIND_OBJECT => {
+                    let size = (functions.weivel_json_object_size)(value);
+                    Tree::Record(
+                        (0..size)
+                            .map(|index| {
+                                let key = (functions.weivel_json_object_key_at)(value, index);
+                                let key = CStr::from_ptr(key).to_string_lossy().into_owned();
+                                let member = (functions.weivel_json_object_value_at)(value, index);
+                                (key, self.tree(member))
+                            })
+                            .collect(),
+                    )
+                }
+                _ => match self.value(value) {
+                    Json::Bool(flag) => Tree::Boolean(flag),
+                    Json::Number(number) => Tree::Number(number),
+                    Json::Text(text) => Tree::Text(text),
+                    _ => Tree::Null,
+                },
+            }
+        }
     }
 
     /// Reads one value of a parsed document.

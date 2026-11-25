@@ -142,6 +142,18 @@ impl<R: Clone, H: Clone> Handles<R, H> {
             .collect()
     }
 
+    /// The first entry `matches` accepts, found by walking every entry, so for a rare question.
+    pub fn find_first(&self, matches: impl Fn(&Entry<R>) -> bool) -> Option<Entry<R>>
+    where
+        R: Clone,
+    {
+        self.lock()
+            .entries
+            .values()
+            .find(|entry| matches(entry))
+            .cloned()
+    }
+
     /// Whether an entry `matches` accepts is held, read by walking every entry, so for a rare question.
     pub fn holds_any(&self, matches: impl Fn(&Entry<R>) -> bool) -> bool {
         self.lock().entries.values().any(matches)
