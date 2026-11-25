@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "importName": "rust",
+  "description": "The Rust language implementation of weivel: it loads the C core its caller names and decides nothing itself.",
+  "topics": [
+    "weivel"
+  ],
+  "dependencies": [
+    {
+      "id": "github:1455223370",
+      "importName": "core",
+      "commit": "e4ff6e982f59a06091c97a918d8800c69e399778"
+    },
+    {
+      "id": "github:1456093642",
+      "importName": "standard",
+      "commit": "b8c40b7cfb994ecd80bb5cd8739245af29954190"
+    },
+    {
+      "id": "github:1426141679",
+      "importName": "conformance",
+      "commit": "928292ce70eab40ecea19b6d5e6f02b6b09c3a4b"
+    }
+  ]
+}

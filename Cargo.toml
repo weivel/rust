@@ -1,0 +1,15 @@
+[package]
+name = "weivel-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "The Rust language implementation of weivel: it loads the C core its caller names and decides nothing itself."
+license = "MIT"
+publish = false
+
+[lib]
+name = "weivel_rust"
+path = "src/lib.rs"
+
+[workspace]
+members = ["scripts/native"]
