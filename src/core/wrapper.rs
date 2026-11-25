@@ -350,6 +350,12 @@ impl Core {
         &self.shared.binary.loaded.functions
     }
 
+    /// The core this wrapper calls, as its create answered it, or `None` once it is destroyed: what a benchmark's bare
+    /// call hands the core's own function, past the wrapper.
+    pub(crate) fn bare_pointer(&self) -> Option<*mut c_void> {
+        self.lock().core.map(|core| core.0)
+    }
+
     fn lock(&self) -> Guard<'_> {
         self.shared
             .state

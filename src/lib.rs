@@ -21,3 +21,5 @@ pub mod standard;
 pub mod program;
 
 pub mod conformance;
+
+pub mod benchmarks;
