@@ -1,7 +1,8 @@
 //! The binder's memory: blocks a call's inputs and answers live in, and the reads and writes every walk over them is
 //! built from. Writing is `write.rs`'s and reading `read.rs`'s.
 
-use std::ffi::{CStr, CString, c_char};
+use std::cell::RefCell;
+use std::ffi::{CStr, c_char};
 
 use super::abi::{
     KIND_ARRAY, KIND_BYTES, KIND_DEFINITION, KIND_F64, KIND_HANDLE, KIND_I64, KIND_POINTER,
@@ -36,16 +37,6 @@ impl Block {
     pub(crate) fn address(&self) -> usize {
         self.start as usize
     }
-
-    /// Empties the block, then sets its leading `size` when it has one.
-    pub(crate) fn empty(&self, leading_size: Option<u32>) {
-        // SAFETY: the block is `words` words the binder owns, and no call is using it.
-        unsafe { std::ptr::write_bytes(self.start, 0, self.words) };
-        if let Some(size) = leading_size {
-            // SAFETY: as above; every block is at least one word.
-            unsafe { put(self.address(), size) };
-        }
-    }
 }
 
 impl Drop for Block {
@@ -69,28 +60,95 @@ pub(super) unsafe fn get<T: Copy>(address: usize) -> T {
     unsafe { std::ptr::read_unaligned(address as *const T) }
 }
 
-/// Every block and text one call's inputs are written into, freed when the call has answered.
+/// The memory of one call: every block and text its inputs are written into and the blocks its answers and refusal
+/// are handed, cut from chunks that each stay at their address, and every handle it was handed, kept from being freed
+/// until the call has returned. A call takes one spare arena of its thread and gives it back emptied, so a call
+/// allocates no memory of its own once its thread has made one like it.
 #[derive(Default)]
 pub(crate) struct Arena {
-    blocks: Vec<Block>,
-    texts: Vec<CString>,
-    /// Every handle the call was handed, kept from being freed until the call has returned.
+    chunks: Vec<Block>,
+    current: usize,
+    /// Words used of the current chunk.
+    used: usize,
     pub(super) handles: Vec<HandleUse>,
 }
 
+/// The words of the first chunk an arena cuts from: room for the inputs and answers of most calls.
+const FIRST_CHUNK_WORDS: usize = 512;
+/// The most words a spare arena keeps, so one large call does not hold its memory for the thread's life.
+const MOST_SPARE_WORDS: usize = 8 * 1024;
+/// The most spare arenas a thread keeps: one per call its thread can have running inside another.
+const MOST_SPARE_ARENAS: usize = 4;
+
+thread_local! {
+    static SPARE_ARENAS: RefCell<Vec<Arena>> = const { RefCell::new(Vec::new()) };
+}
+
 impl Arena {
-    pub(super) fn block(&mut self, bytes: usize) -> usize {
-        let block = Block::zeroed(bytes);
-        let address = block.address();
-        self.blocks.push(block);
-        address
+    /// A spare arena of this thread, or a new one.
+    pub(crate) fn take() -> Arena {
+        SPARE_ARENAS
+            .try_with(|spare| spare.borrow_mut().pop())
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
+    /// Empties the arena, releasing every handle use it holds, and keeps it as a spare of this thread.
+    pub(crate) fn give_back(mut self) {
+        self.handles.clear();
+        self.current = 0;
+        self.used = 0;
+        let mut kept = 0;
+        self.chunks.retain(|chunk| {
+            kept += chunk.words;
+            kept <= MOST_SPARE_WORDS
+        });
+        let _ = SPARE_ARENAS.try_with(|spare| {
+            let mut spare = spare.borrow_mut();
+            if spare.len() < MOST_SPARE_ARENAS {
+                spare.push(self);
+            }
+        });
+    }
+
+    /// A zeroed block of at least `bytes`, aligned for any member a description holds, which stays at its address
+    /// until the arena is given back or dropped.
+    pub(super) fn block(&mut self, bytes: usize) -> usize {
+        let words = bytes.div_ceil(8).max(1);
+        loop {
+            if let Some(chunk) = self.chunks.get(self.current) {
+                if chunk.words - self.used >= words {
+                    let address = chunk.address() + self.used * size_of::<u64>();
+                    self.used += words;
+                    // SAFETY: the words lie inside the chunk, which the arena owns, and no other block holds them.
+                    unsafe { std::ptr::write_bytes(address as *mut u64, 0, words) };
+                    return address;
+                }
+                if self.current + 1 < self.chunks.len() {
+                    self.current += 1;
+                    self.used = 0;
+                    continue;
+                }
+            }
+            let last = self.chunks.last().map_or(0, |chunk| chunk.words);
+            let size = words.max(FIRST_CHUNK_WORDS).max(last * 2);
+            self.chunks.push(Block::zeroed(size * size_of::<u64>()));
+            self.current = self.chunks.len() - 1;
+            self.used = 0;
+        }
+    }
+
+    /// `text` as a NUL-terminated C text in the arena, refusing one that holds a NUL.
     pub(super) fn text(&mut self, text: &str) -> Result<usize, String> {
-        let text = CString::new(text)
-            .map_err(|_| format!("the text {text:?} holds a NUL, which no C text can"))?;
-        let address = text.as_ptr() as usize;
-        self.texts.push(text);
+        if text.as_bytes().contains(&0) {
+            return Err(format!(
+                "the text {text:?} holds a NUL, which no C text can"
+            ));
+        }
+        let address = self.block(text.len() + 1);
+        // SAFETY: the block holds the text and its NUL, which the zeroed block already ends in.
+        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), address as *mut u8, text.len()) };
         Ok(address)
     }
 }
@@ -122,21 +180,23 @@ pub(super) fn wrong(place: &str, kind: u32, value: &Value) -> String {
     )
 }
 
+/// The layout of the struct `type_name`; `place` spells out where it was met, only when the description lacks it.
 pub(super) fn struct_of<'layouts>(
     layouts: &'layouts Layouts,
     type_name: Option<&str>,
-    place: &str,
+    place: &dyn Fn() -> String,
 ) -> Result<&'layouts LaidOut, String> {
     layouts
         .laid_out(type_name)
-        .ok_or_else(|| format!("{place} reaches a struct its description lacks"))
+        .ok_or_else(|| format!("{} reaches a struct its description lacks", place()))
 }
 
-/// The slot of a scalar kind, from its value or as its zero; none for any other kind.
+/// The slot of a scalar kind, from its value or as its zero; none for any other kind. `place` spells out where the
+/// value lies, only when its kind does not hold it.
 pub(super) fn scalar_slot(
     kind: u32,
     value: Option<&Value>,
-    place: &str,
+    place: &dyn Fn() -> String,
 ) -> Result<Option<Slot>, String> {
     let slot = match (kind, value) {
         (KIND_U32 | KIND_U64 | KIND_I64 | KIND_SIZE, None) => Slot::Word(0),
@@ -147,7 +207,7 @@ pub(super) fn scalar_slot(
         (KIND_SIZE, Some(Value::Size(number))) => Slot::Word(*number as u64),
         (KIND_F64, Some(Value::F64(number))) => Slot::Float(*number),
         (KIND_U32 | KIND_U64 | KIND_I64 | KIND_SIZE | KIND_F64, Some(other)) => {
-            return Err(wrong(place, kind, other));
+            return Err(wrong(&place(), kind, other));
         }
         _ => return Ok(None),
     };

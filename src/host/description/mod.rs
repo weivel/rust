@@ -14,10 +14,14 @@ mod holdings;
 mod invoke;
 #[forbid(unsafe_code)]
 mod layouts;
+#[forbid(unsafe_code)]
+mod members;
 mod memory;
 mod operations;
 mod read;
 mod reader;
+#[forbid(unsafe_code)]
+mod stack;
 #[forbid(unsafe_code)]
 mod value;
 mod write;

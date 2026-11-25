@@ -1,8 +1,8 @@
 //! C libraries as host services: loaded from a declaration and a path, each service registered under `WEIVEL_HOST`,
 //! unloaded at once, and each binary closed once nothing of it can run.
 
-use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::declaration::{LibraryDeclaration, LibraryServiceDeclaration, mistake_in};
@@ -17,18 +17,34 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// A library's binary while it is open to calls: taken at the unload or the destroy, so a later call finds none and a
-/// call under way keeps the binary open only until it returns.
+/// A library's binary while it is open to calls: closed at the unload or the destroy, so a later call finds none and a
+/// call under way keeps the binary open only until it returns and its answer is dropped. A call reads a flag and
+/// upgrades a weak reference rather than taking a lock, which cost more than the call into the library: the reference
+/// upgrades only while something still holds the binary, and the flag refuses a call begun after the close even then.
 struct Lifetime {
+    open: AtomicBool,
     binary: Mutex<Option<Arc<LibraryBinary>>>,
+    calls: Weak<LibraryBinary>,
 }
 
 impl Lifetime {
+    fn new(binary: &Arc<LibraryBinary>) -> Lifetime {
+        Lifetime {
+            open: AtomicBool::new(true),
+            binary: Mutex::new(Some(binary.clone())),
+            calls: Arc::downgrade(binary),
+        }
+    }
+
     fn binary(&self) -> Option<Arc<LibraryBinary>> {
-        locked(&self.binary).clone()
+        if !self.open.load(Ordering::Acquire) {
+            return None;
+        }
+        self.calls.upgrade()
     }
 
     fn close_to_calls(&self) {
+        self.open.store(false, Ordering::Release);
         let closing = locked(&self.binary).take();
         drop(closing);
     }
@@ -56,7 +72,8 @@ pub enum LibraryAnswer {
 /// declared name as a plain call into the library.
 pub struct LibraryService {
     id: String,
-    functions: BTreeMap<String, BytesFunction>,
+    /// By name, in name order.
+    functions: Vec<(String, BytesFunction)>,
     lifetime: Arc<Lifetime>,
 }
 
@@ -68,19 +85,49 @@ impl LibraryService {
 
     /// The names of its functions.
     pub fn function_names(&self) -> Vec<String> {
-        self.functions.keys().cloned().collect()
+        self.functions
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Calls the function `function` with `input`, lent to the library for the call only. The bytes it answers are
     /// the library's, read in place and released when the answer is dropped, keeping the binary open until then.
     pub fn call(&self, function: &str, input: &[u8]) -> LibraryAnswer {
-        let Some(bytes_function) = self.functions.get(function).copied() else {
-            return LibraryAnswer::NoSuchFunction;
-        };
+        match self.function(function) {
+            Some(function) => function.call(input),
+            None => LibraryAnswer::NoSuchFunction,
+        }
+    }
+
+    /// The function `function`, found once, for a caller that calls it more than once.
+    pub fn function(&self, function: &str) -> Option<LibraryServiceFunction<'_>> {
+        let bytes_function = self
+            .functions
+            .iter()
+            .find(|(name, _)| name == function)
+            .map(|(_, bytes_function)| *bytes_function)?;
+        Some(LibraryServiceFunction {
+            function: bytes_function,
+            lifetime: &self.lifetime,
+        })
+    }
+}
+
+/// One function of a [`LibraryService`], found by its name once.
+#[derive(Clone, Copy)]
+pub struct LibraryServiceFunction<'a> {
+    function: BytesFunction,
+    lifetime: &'a Lifetime,
+}
+
+impl LibraryServiceFunction<'_> {
+    /// Calls the function with `input`, as [`LibraryService::call`] does.
+    pub fn call(&self, input: &[u8]) -> LibraryAnswer {
         let Some(binary) = self.lifetime.binary() else {
             return LibraryAnswer::Unloaded;
         };
-        let answered = binary.call(bytes_function, input);
+        let answered = LibraryBinary::call(binary, self.function, input);
         match answered.status {
             0 => LibraryAnswer::Returned(answered.body),
             status => LibraryAnswer::Failed {
@@ -291,9 +338,7 @@ impl Host {
         declaration: &LibraryDeclaration,
         withheld: &[&str],
     ) -> Result<LoadedLibrary, Answer> {
-        let lifetime = Arc::new(Lifetime {
-            binary: Mutex::new(Some(binary.clone())),
-        });
+        let lifetime = Arc::new(Lifetime::new(&binary));
         let holdings = Holdings::of_a_library();
         let objects = declaration
             .services
@@ -470,7 +515,9 @@ fn bytes_service(
                 binary.bytes_function(&function.symbol)?,
             ))
         })
-        .collect::<Result<BTreeMap<_, _>, Answer>>()?;
+        .collect::<Result<Vec<_>, Answer>>()?;
+    let mut functions = functions;
+    functions.sort_by(|(left, _), (right, _)| left.cmp(right));
     Ok(Arc::new(LibraryService {
         id: service.id.clone(),
         functions,

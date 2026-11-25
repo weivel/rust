@@ -171,8 +171,13 @@ impl LibraryBinary {
         })
     }
 
-    /// Calls a bytes function with `input` lent for the call, answering its status and its body in place.
-    pub(crate) fn call(self: &Arc<Self>, function: BytesFunction, input: &[u8]) -> BytesCall {
+    /// Calls a bytes function with `input` lent for the call, answering its status and its body in place, the body
+    /// holding `binary` open until it is dropped.
+    pub(crate) fn call(
+        binary: Arc<LibraryBinary>,
+        function: BytesFunction,
+        input: &[u8],
+    ) -> BytesCall {
         let mut pointer: *mut u8 = std::ptr::null_mut();
         let mut length = 0usize;
         // SAFETY: the input lives across the call, and the out pointers are the crate's own.
@@ -181,7 +186,7 @@ impl LibraryBinary {
         BytesCall {
             status,
             body: LibraryBytes {
-                binary: self.clone(),
+                binary,
                 pointer,
                 length: if pointer.is_null() { 0 } else { length },
             },

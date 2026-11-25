@@ -1,11 +1,14 @@
 //! A description as Rust values, read once at the load from the struct its library answered.
 
+use std::sync::Arc;
+
 use super::abi::{KIND_CONTEXT, KIND_STORAGE, KIND_U32};
 
 /// One member of a described struct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Member {
-    pub(crate) name: String,
+    /// Shared by every answer that carries the member, so reading one copies no name.
+    pub(crate) name: Arc<str>,
     pub(crate) offset: usize,
     pub(crate) size: usize,
     pub(crate) kind: u32,
@@ -34,7 +37,8 @@ pub(crate) struct Enum {
 /// One parameter of an operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parameter {
-    pub(crate) name: String,
+    /// Shared by every answer that carries the parameter, so reading one copies no name.
+    pub(crate) name: Arc<str>,
     pub(crate) kind: u32,
     pub(crate) role: u32,
     pub(crate) element: u32,
@@ -75,19 +79,19 @@ impl Description {
 impl Member {
     /// A U32 called `size` at offset 0: the struct's own size, set by the binding and never answered.
     pub(crate) fn is_leading_size(&self) -> bool {
-        self.kind == KIND_U32 && self.name == "size" && self.offset == 0
+        self.kind == KIND_U32 && &*self.name == "size" && self.offset == 0
     }
 }
 
 impl Type {
     pub(crate) fn member_named(&self, name: &str) -> Option<&Member> {
-        self.members.iter().find(|member| member.name == name)
+        self.members.iter().find(|member| &*member.name == name)
     }
 
     fn counts(&self, member: &Member) -> bool {
         self.members
             .iter()
-            .any(|other| other.count.as_deref() == Some(member.name.as_str()))
+            .any(|other| other.count.as_deref() == Some(&*member.name))
     }
 
     /// Whether a caller writes `member` and an answer carries it: all but a leading size, a count, the context and

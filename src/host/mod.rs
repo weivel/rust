@@ -45,7 +45,7 @@ pub use entry::{
     Activation, ActivationState, DescriptionCheck, Entry, Finished, HostOptions, HostScheduler,
     Outcome,
 };
-pub use libraries::{LibraryAnswer, LibraryService, LoadedLibrary};
+pub use libraries::{LibraryAnswer, LibraryService, LibraryServiceFunction, LoadedLibrary};
 pub use methods::{Method, MethodResult, Methods, methods_of};
 pub use offers::PluginOffer;
 pub use seam::{

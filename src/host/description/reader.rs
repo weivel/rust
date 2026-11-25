@@ -49,7 +49,7 @@ fn member_of(member: &abi::DescribedMember) -> Result<Member, Unreadable> {
     // SAFETY: every text a checked description names is NUL-terminated and lives as long as its library.
     unsafe {
         Ok(Member {
-            name: text(member.name)?,
+            name: text(member.name)?.into(),
             offset: member.offset,
             size: member.size,
             kind: member.kind,
@@ -91,7 +91,7 @@ fn parameter_of(parameter: &abi::DescribedParameter) -> Result<Parameter, Unread
     // SAFETY: as for `member_of`.
     unsafe {
         Ok(Parameter {
-            name: text(parameter.name)?,
+            name: text(parameter.name)?.into(),
             kind: parameter.kind,
             role: parameter.role,
             element: parameter.element,

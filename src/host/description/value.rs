@@ -7,8 +7,7 @@ use std::sync::Arc;
 use super::definition::BoundDefinition;
 use super::holdings::{DescribedHandle, KeptAnswer};
 
-/// One struct's members by name, as an input writes them and an answer carries them.
-pub type Members = BTreeMap<String, Value>;
+pub use super::members::Members;
 
 /// An operation's inputs by parameter name.
 pub type Inputs = BTreeMap<String, Value>;
@@ -82,7 +81,7 @@ pub enum DescribedAnswer {
 /// definition, which lives until [`Answers::release`], its library's unload, or the drop of its last part.
 pub struct Answers {
     pub(crate) values: Members,
-    pub(crate) only: Option<String>,
+    pub(crate) only: Option<Arc<str>>,
     pub(crate) kept: Option<Arc<KeptAnswer>>,
 }
 

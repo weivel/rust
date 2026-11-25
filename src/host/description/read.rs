@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::mem::offset_of;
+use std::sync::Arc;
 
 use super::abi::{
     self, DEPTH_LIMIT, KIND_ARRAY, KIND_BYTES, KIND_DEFINITION, KIND_HANDLE, KIND_POINTER,
@@ -13,6 +14,7 @@ use super::abi::{
 use super::described::{Member, Parameter};
 use super::layouts::{LaidOut, Layouts};
 use super::memory::{bytes_at, counted_text, get, scalar_at, struct_of, text_at, texts_at};
+use super::stack::Stack;
 use super::value::{Members, Tree, Value};
 
 /// What reading an answer makes of a handle and of a definition it carries.
@@ -31,7 +33,7 @@ pub(crate) struct Reader<'a> {
 
 /// Where a part read goes in its parent: a struct's member, or an item of an array, a list or a record.
 enum Key {
-    Member(String),
+    Member(Arc<str>),
     Item(usize),
 }
 
@@ -61,8 +63,8 @@ const PLACEHOLDER: Value = Value::U32(0);
 struct Walk<'layouts, 'answering> {
     layouts: &'layouts Layouts,
     answering: &'answering mut dyn Answering,
-    parts: Vec<Part>,
-    visits: Vec<Visit<'layouts>>,
+    parts: Stack<Part>,
+    visits: Stack<Visit<'layouts>>,
 }
 
 impl<'a> Reader<'a> {
@@ -80,8 +82,8 @@ impl<'a> Reader<'a> {
             let type_name = parameter.type_name.as_deref();
             match parameter.kind {
                 KIND_POINTER => {
-                    let laid_out = struct_of(self.layouts, type_name, "an answer")?;
-                    self.walk(Value::Struct(Members::new()), |at| Visit::Struct {
+                    let laid_out = struct_of(self.layouts, type_name, &an_answer)?;
+                    self.walk(members_of(laid_out), |at| Visit::Struct {
                         address: block,
                         laid_out,
                         depth: 0,
@@ -121,12 +123,14 @@ impl<'a> Reader<'a> {
         let mut walk = Walk {
             layouts: self.layouts,
             answering: &mut *self.answering,
-            parts: vec![Part {
-                value: root,
-                parent: None,
-            }],
-            visits: vec![visit(0)],
+            parts: Stack::new(),
+            visits: Stack::new(),
         };
+        walk.parts.push(Part {
+            value: root,
+            parent: None,
+        });
+        walk.visits.push(visit(0));
         while let Some(visit) = walk.visits.pop() {
             // SAFETY: every visit is of memory the provider filled, reached through the answer's own layouts.
             unsafe {
@@ -177,12 +181,19 @@ fn pointer_answer(
     }
 }
 
+fn an_answer() -> String {
+    "an answer".to_owned()
+}
+
+/// A struct's members, with room for every member `laid_out` shows.
+fn members_of(laid_out: &LaidOut) -> Value {
+    Value::Struct(Members::with_capacity(laid_out.visible.len()))
+}
+
 /// Puts `child` where `key` names in `parent`.
 fn place(parent: &mut Value, key: Key, child: Value) {
     match (parent, key, child) {
-        (Value::Struct(members), Key::Member(name), child) => {
-            members.insert(name, child);
-        }
+        (Value::Struct(members), Key::Member(name), child) => members.push(name, child),
         (Value::Array(items), Key::Item(index), child) => items[index] = child,
         (Value::Tree(Tree::List(items)), Key::Item(index), Value::Tree(tree)) => {
             items[index] = tree;
@@ -215,9 +226,9 @@ impl<'layouts> Walk<'layouts, '_> {
         self.parts.pop().map_or(PLACEHOLDER, |root| root.value)
     }
 
-    fn set_member(&mut self, at: usize, name: &str, value: Value) {
+    fn set_member(&mut self, at: usize, name: &Arc<str>, value: Value) {
         if let Value::Struct(members) = &mut self.parts[at].value {
-            members.insert(name.to_owned(), value);
+            members.push(name.clone(), value);
         }
     }
 
@@ -236,16 +247,12 @@ impl<'layouts> Walk<'layouts, '_> {
             ));
         }
         let described = &laid_out.described;
-        for index in &laid_out.visible {
-            let member = &described.members[*index];
-            let count = member
-                .count
-                .as_deref()
-                .and_then(|name| described.member_named(name))
+        for visible in &laid_out.visible {
+            let member = &described.members[visible.index];
+            let count = visible
+                .count_offset
                 // SAFETY: a count is a SIZE member of the same struct.
-                .map_or(0, |counted_by| unsafe {
-                    get::<usize>(address + counted_by.offset)
-                });
+                .map_or(0, |offset| unsafe { get::<usize>(address + offset) });
             // SAFETY: as the caller promised.
             unsafe { self.member(address + member.offset, member, count, depth, at)? };
         }
@@ -277,8 +284,8 @@ impl<'layouts> Walk<'layouts, '_> {
                 KIND_TEXTS => Value::Texts(texts_at(get(address), count)?),
                 KIND_BYTES => Value::Bytes(bytes_at(get(address), count)),
                 KIND_STRUCT => {
-                    let laid_out = struct_of(self.layouts, type_name, "an answer")?;
-                    let part = self.part(Value::Struct(Members::new()), at, key());
+                    let laid_out = struct_of(self.layouts, type_name, &an_answer)?;
+                    let part = self.part(members_of(laid_out), at, key());
                     self.visits.push(Visit::Struct {
                         address,
                         laid_out,
@@ -359,8 +366,8 @@ impl<'layouts> Walk<'layouts, '_> {
             unsafe { self.node_part(pointer, 0, parent, key) };
             return Ok(());
         }
-        let laid_out = struct_of(self.layouts, type_name, "an answer")?;
-        let part = self.part(Value::Struct(Members::new()), parent, key);
+        let laid_out = struct_of(self.layouts, type_name, &an_answer)?;
+        let part = self.part(members_of(laid_out), parent, key);
         self.visits.push(Visit::Struct {
             address: pointer,
             laid_out,
@@ -393,8 +400,8 @@ impl<'layouts> Walk<'layouts, '_> {
             // SAFETY: as the caller promised.
             let item = match element {
                 KIND_STRUCT => {
-                    let laid_out = struct_of(self.layouts, type_name, "an answer")?;
-                    let part = self.part(Value::Struct(Members::new()), array, Key::Item(index));
+                    let laid_out = struct_of(self.layouts, type_name, &an_answer)?;
+                    let part = self.part(members_of(laid_out), array, Key::Item(index));
                     self.visits.push(Visit::Struct {
                         address,
                         laid_out,

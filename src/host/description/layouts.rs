@@ -22,13 +22,24 @@ struct Field {
     align: usize,
 }
 
-/// One struct, laid out and checked: its description, its alignment, and which of its members a caller writes.
+/// One struct, laid out and checked: its description, its alignment, which of its members a caller writes, and what
+/// each call would otherwise look up by name.
 #[derive(Debug)]
 pub(crate) struct LaidOut {
     pub(crate) described: Type,
     pub(crate) align: usize,
-    /// The indices of the members a caller writes and an answer carries, in the description's order.
-    pub(crate) visible: Vec<usize>,
+    /// The members a caller writes and an answer carries, in the description's order.
+    pub(crate) visible: Vec<Visible>,
+    /// The size its leading `size` member is set to, if it has one.
+    pub(crate) leading_size: Option<u32>,
+}
+
+/// One member a caller writes and an answer carries: its index among the struct's members, and the offset of the
+/// member that counts it, if one does.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Visible {
+    pub(crate) index: usize,
+    pub(crate) count_offset: Option<usize>,
 }
 
 /// The layouts of every struct one description names, built once at the load.
@@ -103,7 +114,16 @@ impl Builder<'_> {
         let align = self.check(&described, &fields)?;
         let visible = (0..described.members.len())
             .filter(|index| described.is_visible(&described.members[*index]))
+            .map(|index| Visible {
+                index,
+                count_offset: described.members[index]
+                    .count
+                    .as_deref()
+                    .and_then(|name| described.member_named(name))
+                    .map(|counted_by| counted_by.offset),
+            })
             .collect();
+        let leading_size = described.leading_size();
         let size = described.size;
         self.built.insert(
             name.to_owned(),
@@ -111,6 +131,7 @@ impl Builder<'_> {
                 described,
                 align,
                 visible,
+                leading_size,
             },
         );
         Ok((size, align))
@@ -148,7 +169,7 @@ impl Builder<'_> {
         for member in &described.members {
             let (size, align) = self.member_layout(member)?;
             fields.push(Field {
-                name: member.name.clone(),
+                name: member.name.to_string(),
                 offset: member.offset,
                 size,
                 align,

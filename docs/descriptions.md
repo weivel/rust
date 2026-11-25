@@ -30,13 +30,17 @@ the binary closes and how a holder lets go is the same for a bound definition as
 
 `BoundDefinition::call(operation, inputs)` takes `Inputs`, a map keyed by input parameter name, over one `Value` enum:
 `U32` (an enum's value included), `U64`, `I64`, `F64`, `Size`, `Text` (none for NULL), `Texts`, `Bytes`, `Array`,
-`Struct` (a `Members` map keyed by member name), `Tree` (the standard's value tree), `Handle` and `Definition`. A
+`Struct` (`Members`, a struct's members by name in the order they were put, an answer's in the description's
+order, its names shared with the description rather than copied), `Tree` (the standard's value tree), `Handle` and `Definition`. A
 pointer is what it points at, a counted array, texts or bytes carry their own count, which the binding writes, and a
 left-out input or member is its kind's zero: 0, NULL, an empty array or a value of kind NONE. A leading `size`, every
 count, the context and storage are the binding's: naming one, a name the operation or struct does not take, a value of
 another kind than its parameter's, a text holding a NUL, a number in a value tree that is not finite, a key twice in a
 record, or structs nested deeper than `WEIVEL_STANDARD_VALUE_DEPTH_LIMIT` is the caller's mistake, and nothing is
-called. Every input is written into memory of the call's own, which lives until the call answers.
+called. Every input is written into memory of the call's own, which lives until the call answers: cut, with the
+answer and refusal blocks, from an arena the call's thread keeps and empties again, so a call allocates only what its
+answer is made of. Where a wrong value lies is spelled out only when it is wrong. `tests/allocations` pins how many
+allocations a `reflect` and a `negate` make, so a call that grows slower by allocating fails a test.
 
 A call answers `Ok(DescribedAnswer::Answered(answers))` on OK, each answer by name, a NULL pointer, a NULL handle, a
 NULL definition and a value of kind NONE left out, `Answers::value` reading an operation's one answer; and

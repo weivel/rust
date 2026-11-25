@@ -13,7 +13,7 @@ use super::described::{Operation, Parameter};
 use super::holdings::{CarriedScope, DescribedHandle, Holdings, KeptAnswer, KeptBlocks, Mapping};
 use super::invoke::{self, MOST_PARAMETERS, ReleaseCall, Slot};
 use super::layouts::{LayoutRefusal, Layouts};
-use super::memory::{Arena, Block};
+use super::memory::{Arena, put};
 use super::read::{Answering, Reader};
 use super::value::{
     Answers, CallStatus, DescribedAnswer, DescribedCallError, Inputs, Members, Value,
@@ -45,7 +45,7 @@ pub(crate) struct OperationPlan {
     parameters: Vec<Parameter>,
     /// One step per parameter after the context.
     steps: Vec<Step>,
-    input_names: Vec<String>,
+    input_names: Vec<Arc<str>>,
     answers: Vec<(usize, BlockShape)>,
     refusal: Option<(usize, BlockShape)>,
 }
@@ -76,7 +76,7 @@ fn shape_of(layouts: &Layouts, parameter: &Parameter) -> BlockShape {
     match (parameter.kind, laid_out) {
         (KIND_POINTER, Some(laid_out)) => BlockShape {
             bytes: laid_out.described.size,
-            leading_size: laid_out.described.leading_size(),
+            leading_size: laid_out.leading_size,
         },
         (KIND_VALUE, _) => BlockShape {
             bytes: size_of::<ValueTree>(),
@@ -119,7 +119,7 @@ impl OperationPlan {
         let index_of = |name: &str| {
             parameters
                 .iter()
-                .position(|parameter| parameter.name == name)
+                .position(|parameter| &*parameter.name == name)
         };
         let mut plan = OperationPlan {
             name: operation.name.clone(),
@@ -140,7 +140,7 @@ impl OperationPlan {
                     plan.refusal = Some((index, shape_of(layouts, parameter)));
                     Step::Refusal
                 }
-                ROLE_INPUT if counted.contains(&parameter.name.as_str()) => Step::Count,
+                ROLE_INPUT if counted.contains(&&*parameter.name) => Step::Count,
                 _ => {
                     plan.input_names.push(parameter.name.clone());
                     Step::Input {
@@ -161,7 +161,7 @@ impl OperationPlan {
     pub(crate) fn answer_names(&self) -> Vec<&str> {
         self.answers
             .iter()
-            .map(|(index, _)| self.parameters[*index].name.as_str())
+            .map(|(index, _)| &*self.parameters[*index].name)
             .collect()
     }
 
@@ -169,11 +169,11 @@ impl OperationPlan {
     pub(crate) fn input(&self, name: &str) -> Option<&Parameter> {
         self.input_names
             .iter()
-            .any(|input| input == name)
+            .any(|input| &**input == name)
             .then(|| {
                 self.parameters
                     .iter()
-                    .find(|parameter| parameter.name == name)
+                    .find(|parameter| &*parameter.name == name)
             })
             .flatten()
     }
@@ -196,23 +196,29 @@ impl OperationPlan {
                 self.name
             )));
         }
-        if let Some(unknown) = inputs.keys().find(|name| !self.input_names.contains(name)) {
+        if let Some(unknown) = inputs
+            .keys()
+            .find(|name| !self.input_names.iter().any(|input| **input == ***name))
+        {
             return Err(self.mistake(format!(
                 "{} has no input {unknown} a caller writes; it takes {}",
                 self.name,
                 self.input_names.join(", ")
             )));
         }
-        let blocks = self.blocks();
-        let mut writer = Writer {
-            layouts: target.layouts,
-            library: target.holdings.library(),
-            arena: Arena::default(),
+        let mut arena = Arena::take();
+        let blocks = self.blocks(&mut arena);
+        let mut writer = Writer::new(target.layouts, target.holdings.library(), arena);
+        let slots = match self.slots(&mut writer, &blocks, inputs) {
+            Ok(slots) => slots,
+            Err(detail) => {
+                writer.arena.give_back();
+                return Err(self.mistake(detail));
+            }
         };
-        let slots = self
-            .slots(&mut writer, &blocks, inputs)
-            .map_err(|detail| self.mistake(detail))?;
+        let arena = writer.arena;
         let Some(mapped) = target.mapping.hold() else {
+            arena.give_back();
             if target.mapping.carrier_ended() {
                 return Err(self.mistake(
                     "the definition was carried by an answer that has ended, and lives only as long as that answer"
@@ -229,50 +235,59 @@ impl OperationPlan {
         // SAFETY: the function is this operation's, read from its definition's struct, its binary held mapped across
         // the call; the slots follow the parameters' kinds, and every pointer among them lies in the call's arena or
         // its blocks, which live past the call.
-        let status = unsafe { invoke::call_operation(target.function, target.context, &slots) };
-        let outcome = self.outcome(target, status, blocks);
-        drop(writer);
+        let status =
+            unsafe { invoke::call_operation(target.function, target.context, slots.as_slice()) };
+        let outcome = self.outcome(target, status, blocks, arena);
         drop(mapped);
         outcome
     }
 
-    fn blocks(&self) -> CallBlocks {
-        let block = |shape: &BlockShape| {
-            let block = Block::zeroed(shape.bytes);
-            block.empty(shape.leading_size);
-            block
+    /// The answer blocks and the refusal block, cut from the call's arena, each empty with its leading size set.
+    fn blocks(&self, arena: &mut Arena) -> CallBlocks {
+        let mut block = |shape: &BlockShape| {
+            let address = arena.block(shape.bytes);
+            if let Some(size) = shape.leading_size {
+                // SAFETY: every block is at least one word, and the arena zeroed it.
+                unsafe { put(address, size) };
+            }
+            address
         };
+        let mut answers = [0; MOST_PARAMETERS];
+        for (answer, (_, shape)) in self.answers.iter().enumerate() {
+            answers[answer] = block(shape);
+        }
         CallBlocks {
-            answers: self.answers.iter().map(|(_, shape)| block(shape)).collect(),
+            answers,
             refusal: self.refusal.as_ref().map(|(_, shape)| block(shape)),
         }
     }
 
-    fn slots(
-        &self,
-        writer: &mut Writer<'_>,
+    fn slots<'a>(
+        &'a self,
+        writer: &mut Writer<'a>,
         blocks: &CallBlocks,
-        inputs: &Inputs,
-    ) -> Result<Vec<Slot>, String> {
-        let mut slots = vec![Slot::Word(0); self.steps.len()];
+        inputs: &'a Inputs,
+    ) -> Result<Slots, String> {
+        let mut slots = Slots {
+            slots: [Slot::Word(0); MOST_PARAMETERS],
+            count: self.steps.len(),
+        };
         for (position, step) in self.steps.iter().enumerate() {
             let parameter = &self.parameters[position + 1];
             match step {
                 Step::Answer(answer) => {
-                    slots[position] = Slot::Word(blocks.answers[*answer].address() as u64)
+                    slots.slots[position] = Slot::Word(blocks.answers[*answer] as u64)
                 }
                 Step::Refusal => {
-                    slots[position] =
-                        Slot::Word(blocks.refusal.as_ref().map_or(0, Block::address) as u64)
+                    slots.slots[position] = Slot::Word(blocks.refusal.unwrap_or(0) as u64)
                 }
                 Step::Count => {}
                 Step::Input { count } => {
-                    let place = format!("{}'s {}", self.name, parameter.name);
                     let (slot, counted) =
-                        writer.input(parameter, inputs.get(&parameter.name), &place)?;
-                    slots[position] = slot;
+                        writer.input(&self.name, parameter, inputs.get(&*parameter.name))?;
+                    slots.slots[position] = slot;
                     if let Some(count) = count {
-                        slots[*count] = Slot::Word(counted as u64);
+                        slots.slots[*count] = Slot::Word(counted as u64);
                     }
                 }
             }
@@ -285,13 +300,16 @@ impl OperationPlan {
         target: &CallTarget<'_>,
         status: i32,
         blocks: CallBlocks,
+        arena: Arena,
     ) -> Result<DescribedAnswer, DescribedCallError> {
         match status {
             STATUS_OK => {}
-            STATUS_NONE => return self.finish(target, blocks, Ok(DescribedAnswer::None)),
+            STATUS_NONE => {
+                return self.finish(target, &blocks, arena, Ok(DescribedAnswer::None));
+            }
             _ => {
                 let failure = self.failure(target, status, &blocks);
-                return self.finish(target, blocks, Err(failure));
+                return self.finish(target, &blocks, arena, Err(failure));
             }
         }
         let mut carried = Carried {
@@ -305,7 +323,8 @@ impl OperationPlan {
                 carried.release_all();
                 return self.finish(
                     target,
-                    blocks,
+                    &blocks,
+                    arena,
                     Err(DescribedCallError::fault(&self.name, fault)),
                 );
             }
@@ -320,29 +339,41 @@ impl OperationPlan {
                 only,
                 kept: None,
             };
-            return self.finish(target, blocks, Ok(DescribedAnswer::Answered(answers)));
+            return self.finish(
+                target,
+                &blocks,
+                arena,
+                Ok(DescribedAnswer::Answered(answers)),
+            );
         }
         self.release_refusal(target, &blocks);
+        let mut releases = Vec::new();
+        self.each_answer_release(target, &blocks, |pointer, release| {
+            releases.push((pointer, release))
+        });
+        let mut arena = arena;
+        arena.handles.clear();
         let kept = KeptBlocks {
-            releases: self.answer_releases(target, &blocks),
-            blocks: blocks.answers,
+            releases,
+            arena,
             mapping: target.mapping.clone(),
         };
         let kept = Some(carried.keep(kept));
         Ok(DescribedAnswer::Answered(Answers { values, only, kept }))
     }
 
-    /// Releases the refusal and every answer through the releases their description names, then answers `answer`.
+    /// Releases the refusal and every answer through the releases their description names, gives the arena back,
+    /// then answers `answer`.
     fn finish(
         &self,
         target: &CallTarget<'_>,
-        blocks: CallBlocks,
+        blocks: &CallBlocks,
+        arena: Arena,
         answer: Result<DescribedAnswer, DescribedCallError>,
     ) -> Result<DescribedAnswer, DescribedCallError> {
-        self.release_refusal(target, &blocks);
-        for (pointer, release) in self.answer_releases(target, &blocks) {
-            release.free(pointer);
-        }
+        self.release_refusal(target, blocks);
+        self.each_answer_release(target, blocks, |pointer, release| release.free(pointer));
+        arena.give_back();
         answer
     }
 
@@ -352,37 +383,40 @@ impl OperationPlan {
         blocks: &CallBlocks,
         carried: &mut Carried<'_>,
     ) -> Result<Members, String> {
-        let mut values = Members::new();
+        let mut values = Members::with_capacity(self.answers.len());
         let mut reader = Reader {
             layouts: target.layouts,
             answering: carried,
         };
         for (answer, (index, _)) in self.answers.iter().enumerate() {
             let parameter = &self.parameters[*index];
-            if let Some(value) = reader.answer(parameter, blocks.answers[answer].address())? {
-                values.insert(parameter.name.clone(), value);
+            if let Some(value) = reader.answer(parameter, blocks.answers[answer])? {
+                values.push(parameter.name.clone(), value);
             }
         }
         Ok(values)
     }
 
-    fn answer_releases(
+    /// Hands `each` every answer block a release frees and that release, in the order the operation takes them.
+    fn each_answer_release(
         &self,
         target: &CallTarget<'_>,
         blocks: &CallBlocks,
-    ) -> Vec<(usize, ReleaseCall)> {
-        self.answers
-            .iter()
-            .enumerate()
-            .filter_map(|(answer, (index, _))| {
-                let parameter = &self.parameters[*index];
-                if parameter.kind == KIND_HANDLE {
-                    return None;
-                }
-                let release = target.releases.get(parameter.release.as_deref()?)?;
-                Some((blocks.answers[answer].address(), *release))
-            })
-            .collect()
+        mut each: impl FnMut(usize, ReleaseCall),
+    ) {
+        for (answer, (index, _)) in self.answers.iter().enumerate() {
+            let parameter = &self.parameters[*index];
+            if parameter.kind == KIND_HANDLE {
+                continue;
+            }
+            let release = parameter
+                .release
+                .as_deref()
+                .and_then(|name| target.releases.get(name));
+            if let Some(release) = release {
+                each(blocks.answers[answer], *release);
+            }
+        }
     }
 
     fn release_refusal(&self, target: &CallTarget<'_>, blocks: &CallBlocks) {
@@ -393,8 +427,8 @@ impl OperationPlan {
             .release
             .as_deref()
             .and_then(|name| target.releases.get(name));
-        if let (Some(release), Some(block)) = (release, &blocks.refusal) {
-            release.free(block.address());
+        if let (Some(release), Some(block)) = (release, blocks.refusal) {
+            release.free(block);
         }
     }
 
@@ -407,14 +441,14 @@ impl OperationPlan {
         let refused = self
             .refusal
             .as_ref()
-            .zip(blocks.refusal.as_ref())
+            .zip(blocks.refusal)
             .filter(|_| status == STATUS_REFUSED);
         let texts = refused
             .and_then(|((index, _), block)| {
                 let laid_out = target
                     .layouts
                     .laid_out(self.parameters[*index].type_name.as_deref())?;
-                Some(Reader::refusal_texts(laid_out, block.address()))
+                Some(Reader::refusal_texts(laid_out, block))
             })
             .unwrap_or(Ok((None, None)));
         let (detail, fix) = match texts {
@@ -430,10 +464,22 @@ impl OperationPlan {
     }
 }
 
-/// The answer blocks and the refusal block one call hands its provider.
+/// The answer blocks and the refusal block one call hands its provider, each in the call's arena.
 struct CallBlocks {
-    answers: Vec<Block>,
-    refusal: Option<Block>,
+    answers: [usize; MOST_PARAMETERS],
+    refusal: Option<usize>,
+}
+
+/// The slots of one call, one per parameter after the context.
+struct Slots {
+    slots: [Slot; MOST_PARAMETERS],
+    count: usize,
+}
+
+impl Slots {
+    fn as_slice(&self) -> &[Slot] {
+        &self.slots[..self.count]
+    }
 }
 
 /// What one answer carries beyond its copy: every handle wrapped and every definition bound while it was read.
