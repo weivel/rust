@@ -13,6 +13,10 @@ use weivel_rust::conformance::{
 use weivel_rust::host::{Tree, methods_of};
 use weivel_rust::program::{FAILED_RUN_EXIT, RunHostOptions, start_host};
 
+/// Taken by each test that points the test plugins at a run, so none sees another's pointer file between its own
+/// pointer's drop and its look at the file.
+static POINTING_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn run_directory(name: &str) -> PathBuf {
     let directory =
         std::env::temp_dir().join(format!("weivel-rust-program-{name}-{}", std::process::id()));
@@ -154,6 +158,9 @@ fn stops_its_serve_run_on(signal: &str, name: &str) {
 
 #[test]
 fn a_running_host_answers_the_service_its_plugin_registered_until_it_stops() {
+    let _alone = POINTING_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let directory = run_directory("service");
     write(
         &directory.join("alpha/manifest.json"),
@@ -200,6 +207,9 @@ fn a_running_host_answers_the_service_its_plugin_registered_until_it_stops() {
 
 #[test]
 fn a_run_pointer_waits_for_the_run_before_it_and_is_removed_with_it() {
+    let _alone = POINTING_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::sync::atomic::{AtomicBool, Ordering};
     let standard = support::shared_library("weivel_standard");
     let first = point_runs_at(&standard, Path::new("first")).expect("the first run is pointed at");
@@ -224,12 +234,6 @@ fn a_run_pointer_waits_for_the_run_before_it_and_is_removed_with_it() {
     );
     drop(first);
     let read = second.join().expect("the second run ends");
-    assert!(
-        read.ends_with(
-            "second
-"
-        ),
-        "{read:?}"
-    );
+    assert!(read.ends_with("second\n"), "{read:?}");
     assert!(!run_pointer_file().exists());
 }
