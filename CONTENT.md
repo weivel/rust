@@ -2,7 +2,8 @@
 
 The Rust language implementation of weivel, for a host written in Rust that runs plugins written in Rust. It loads the
 core's binary from the path its caller gives and carries out the core's answers, held to the core's contract and to
-the conformance kit's vectors. It is one Cargo package with no dependency at all.
+the conformance kit's vectors. It is one Cargo package with no dependency at all. A host its caller gives no
+scheduler arms the crate's own timer, on a thread of its own.
 
 ## What it is not
 

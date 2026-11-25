@@ -9,7 +9,7 @@
 
 mod abi;
 mod answer;
-mod binary;
+pub(crate) mod binary;
 mod calls;
 mod codes;
 #[doc(hidden)]
@@ -38,3 +38,4 @@ pub use values::{
 pub use wrapper::{
     Core, ErrorSink, Failure, FailureKind, Listener, ListenerRegistration, Wrapping,
 };
+pub(crate) use wrapper::{DeadlineHooks, Hold, HooksRegistration, panic_text};

@@ -1,4 +1,5 @@
-//! What every test target shares: the native files `scripts/native` gathers, and a listener and a sink that record.
+//! What every test target shares: the native files `scripts/native` gathers, the kit's layer vectors, and a listener
+//! and a sink that record.
 
 #![allow(dead_code)]
 
@@ -34,6 +35,27 @@ pub fn shared_library(name: &str) -> PathBuf {
 /// A program `scripts/native` gathered as `name`.
 pub fn program(name: &str) -> PathBuf {
     native_file(&format!("{name}{EXE_SUFFIX}"))
+}
+
+/// The pinned standard's JSON reader, bound from its shared library.
+pub fn standard_json() -> weivel_rust::standard::StandardJson {
+    weivel_rust::standard::StandardJson::load(shared_library("weivel_standard"))
+        .expect("the pinned standard loads")
+}
+
+/// The pinned kit's layer vectors, under `siblings/conformance`.
+pub fn layer_vector_directory() -> PathBuf {
+    let directory = repository_root()
+        .join("siblings")
+        .join("conformance")
+        .join("vectors")
+        .join("layer");
+    assert!(
+        directory.is_dir(),
+        "{} is missing: link or clone the conformance kit at the commit repo.json pins",
+        directory.display()
+    );
+    directory
 }
 
 /// The pinned core's binary, loaded.

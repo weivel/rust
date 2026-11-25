@@ -1,5 +1,6 @@
 //! Builds the native siblings the tests load, with CMake in Release, and gathers what they built into `build/native`:
-//! the core's shared library and its `echo` test library, and the core's and the standard's `layouts` programs.
+//! the core's shared library and its `echo` test library, the standard's shared library, and the core's and the
+//! standard's `layouts` programs.
 
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 use std::fs;
@@ -51,7 +52,10 @@ fn native_siblings() -> Vec<NativeSibling> {
         },
         NativeSibling {
             sibling: "standard",
-            targets: vec![program("layouts", "standard-layouts")],
+            targets: vec![
+                shared_library("weivel_standard_shared", "weivel_standard"),
+                program("layouts", "standard-layouts"),
+            ],
             needs_the_core_source: true,
         },
     ]

@@ -48,7 +48,14 @@ through one wrapper:
   latest deadline after the lock is let go, by one thread at a time; no event of a call that drained an announcement
   is dispatched before `follow` has returned with it.
 
-The deferred steps and the deadline hooks are the crate's own, `pub(crate)`, for the timer and the host to build on:
+A call of the crate's own modules may make several calls of the core in one hold of the lock, each drained as it
+returns, and do its own work between them: the contexts make the record of a handle the core answered there, before
+any event naming it is dispatched, decide there whether a plugin is forgotten, and verify and quarantine in one hold.
+The host may also start a plan as the dispatcher, so what its activates queue is dispatched once the last has been
+called.
+
+The holds, the deferred steps and the deadline hooks are the crate's own, `pub(crate)`, for the timer, the contexts
+and the host to build on:
 the host hands its caller nothing of the wrapper's dispatch, clock or hooks. They are tested by the module's unit tests
 in `src/core/wrapper_tests.rs`, the rest by `tests/core`. `core::declarations` is public only so those tests can hold
 the hand declarations to the core, and is hidden from the crate's documentation.

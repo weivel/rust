@@ -9,6 +9,15 @@ macro_rules! numbered {
 
         impl $name {
             $($(#[$value_meta])* pub const $value: $name = $name($number);)*
+
+            /// The name of the core's constant for this value, as the crate writes it; `None` for a value this build
+            /// does not know.
+            pub fn name(self) -> Option<&'static str> {
+                match self.0 {
+                    $($number => Some(stringify!($value)),)*
+                    _ => None,
+                }
+            }
         }
     };
 }
