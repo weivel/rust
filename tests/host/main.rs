@@ -4,6 +4,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod carried;
 mod descriptions;
 mod libraries;
 mod offers;

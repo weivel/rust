@@ -420,6 +420,38 @@ impl Entry for MethodsProviding {
     }
 }
 
+/// Gets its config and keeps it, reading `greeting` through it whenever its action `greeting` runs.
+#[derive(Default)]
+pub struct ConfigKeeping {
+    config: Arc<Mutex<Option<Object>>>,
+}
+
+impl Entry for ConfigKeeping {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        match context.get("weivel.config") {
+            Ok(config) => {
+                *self.config.lock().unwrap() = Some(config);
+                finished(Ok(()))
+            }
+            Err(refused) => finished(Err(refused.to_string())),
+        }
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        let kept = self.config.clone();
+        weivel_rust::host::Methods::new().with("greeting", move |_| {
+            let object = kept.lock().unwrap().clone().ok_or("no config is kept")?;
+            let config =
+                weivel_rust::standard::Config::of(&object).ok_or("the config is not bound")?;
+            match config.get("greeting") {
+                Ok(setting) => Ok(Some(weivel_rust::host::Tree::Text(format!("{setting:?}")))),
+                Err(refused) => Err(refused.to_string()),
+            }
+        })
+    }
+}
+
+weivel_rust::export_entry!(config_keeping_entry, ConfigKeeping::default());
 weivel_rust::export_entry!(methods_entry, MethodsProviding::default());
 weivel_rust::export_entry!(host_vector_entry, HostVectorPlugin::default());
 

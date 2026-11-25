@@ -88,24 +88,27 @@ same binary keep it open for each other.
 ## The plugin seam
 
 Rust has no stable ABI, so a plugin built as a library of its own, a `cdylib` with its own copy of this crate, is
-reached through size-prefixed C tables of `extern "C"` functions, never through Rust types. The plugin exports its
-entry with `weivel_rust::export_entry!`, under `weivel_rust_entry` or a symbol of its choosing, and
-`Host::load_entry(path, symbol)` answers an `Entry` the host registers as any other. Each activate is handed the host's
-context table of its plugin and its whole manifest, which the plugin's side wraps in the same safe `Context`: every call
-of a context crosses, gets, wants and their withdrawal, watches of services and of capabilities, the listing of ids
-and of implementations, registrations awaiting releases or not and with a capacity answerer or not, unregistrations,
-releases of a holding and capabilities provided, the log and the error sink with every kind of failure, and every
-event about the plugin. A service object crosses as its provider's address, so identity is the address: a consumer in
-the host's binary receives a `ForeignObject` or a `BoundDefinition`, a plugin across the seam receives the address of
-the host's own object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct
-both sides compile. A described definition crosses with the description its library answered, so the plugin's side
-binds it into a `BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose
-operations it calls as an in-process plugin does. It crosses with the host's id of its library too, and that copy holds
-the library mapped through the host's context table for each call and release, as the host's own binding holds its
-library, so once the binary has closed a call through it answers unloaded rather than reaching unmapped code. Before an
-unload closes a library to calls, the host tells every plugin across the seam, which releases what its own bindings of
-that library got while it is still mapped. A definition an answer carried, as a scope's are, crosses with the nested
-description it was bound from and the id of the library its carrier lies in.
+reached through size-prefixed C tables of `extern "C"` functions, never through Rust types. The plugin exports its entry
+with `weivel_rust::export_entry!`, under `weivel_rust_entry` or a symbol of its choosing, and `Host::load_entry(path,
+symbol)` answers an `Entry` the host registers as any other. Each activate is handed the host's context table of its
+plugin and its whole manifest, which the plugin's side wraps in the same safe `Context`: every call of a context
+crosses, gets, wants and their withdrawal, watches of services and of capabilities, the listing of ids and of
+implementations, registrations awaiting releases or not and with a capacity answerer or not, unregistrations, releases
+of a holding and capabilities provided, the log and the error sink with every kind of failure, and every event about the
+plugin. A service object crosses as its provider's address, so identity is the address: a consumer in the host's binary
+receives a `ForeignObject` or a `BoundDefinition`, a plugin across the seam receives the address of the host's own
+object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct both sides
+compile. A described definition crosses with the description its library answered, so the plugin's side binds it into a
+`BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose operations it
+calls as an in-process plugin does. It crosses with the host's id of its library too, and that copy holds the library
+mapped through the host's context table for each call and release, as the host's own binding holds its library, so once
+the binary has closed a call through it answers unloaded rather than reaching unmapped code. Before an unload closes a
+library to calls, the host tells every plugin across the seam, which releases what its own bindings of that library got
+while it is still mapped. A definition an answer carried, as a scope's are, crosses with the nested description it was
+bound from and a mapping of its own, which a hold also enters the answer's scope through, so once the answer has ended,
+as when the scope is released, a call through the plugin's binding is refused as the caller's mistake, never reaching
+the provider's freed memory, exactly as a call through the host's own binding is. A hold is let go of by its mapping id
+alone, so one made while the plugin's context lived is let go of after the host let go of that context too.
 
 A plugin's object that is a `Methods` crosses with its names, told to the host through `offer_methods` before it is
 registered or provided, so the host's `ForeignObject` for it offers each, a call back across the seam to the plugin's

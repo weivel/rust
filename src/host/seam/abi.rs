@@ -157,8 +157,9 @@ pub struct SeamContext {
     pub(super) provide: unsafe extern "C" fn(u64, SeamText, usize, *const SeamAnswer),
     pub(super) implementations: unsafe extern "C" fn(u64, SeamText, *const SeamAnswer),
     pub(super) dispatches_here: unsafe extern "C" fn(u64) -> u32,
-    /// Appended: holds the library a mapping id names mapped, answering 1, or 0 once it has closed; `unhold` lets go of
-    /// one hold.
+    /// Appended: holds the library a mapping id names mapped, answering [`HOLD_HELD`], [`HOLD_CLOSED`] once it has
+    /// closed, or [`HOLD_CARRIER_ENDED`] once the answer that carried its definition has ended; `unhold` lets go of one
+    /// hold.
     pub(super) hold: Option<unsafe extern "C" fn(u64, u64) -> u32>,
     pub(super) unhold: Option<unsafe extern "C" fn(u64, u64)>,
     /// Appended: tells the host that the plugin's object at the address offers the methods named, before it is
@@ -477,6 +478,11 @@ const DESTROYED: u32 = 3;
 const DEFECT: u32 = 4;
 const MISTAKE: u32 = 5;
 const DETACHED: u32 = 6;
+
+/// What the context table's `hold` answers.
+pub(super) const HOLD_CLOSED: u32 = 0;
+pub(super) const HOLD_HELD: u32 = 1;
+pub(super) const HOLD_CARRIER_ENDED: u32 = 2;
 const CONTRACT_MISMATCH: u32 = 7;
 
 /// What a callee answers across the seam, owned on its side until it is lent to the caller's [`SeamAnswer`].

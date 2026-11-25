@@ -22,6 +22,8 @@ pub(crate) trait RemoteMapping: Send + Sync {
     /// Holds the binary mapped until the matching [`RemoteMapping::unhold`], answering false once it has closed.
     fn hold(&self) -> bool;
     fn unhold(&self);
+    /// Whether the last hold was refused because the answer that carried the definition has ended.
+    fn carrier_ended(&self) -> bool;
 }
 
 /// The binary a bound definition's functions lie in: a library this copy of the crate loaded, one the host across the
@@ -49,6 +51,15 @@ impl Drop for MappingHold {
 }
 
 impl Mapping {
+    /// Whether a hold was refused because the answer that carried the definition has ended, rather than its binary
+    /// closed.
+    pub(crate) fn carrier_ended(&self) -> bool {
+        match self {
+            Mapping::Remote(remote) => remote.carrier_ended(),
+            _ => false,
+        }
+    }
+
     /// Holds the binary mapped, or answers none once it has closed.
     pub(crate) fn hold(&self) -> Option<MappingHold> {
         match self {

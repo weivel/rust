@@ -13,10 +13,10 @@ use super::abi::{
     EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_DESCRIPTION_END, EVENT_FIRST_SHAPE,
     EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING, EVENT_MAPPING_END, EVENT_REACH_REFUSED,
     EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED,
-    SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent,
-    SeamManifest, SeamNumber, SeamText, SeamTexts, SeamWantLimits, carries, copy_table,
-    failure_kind_code, lend_answered, lend_numbers, lend_texts, read_answered, read_manifest,
-    read_numbers, read_refusal, size_of_table,
+    HOLD_CARRIER_ENDED, HOLD_CLOSED, HOLD_HELD, SeamAnswer, SeamAnswered, SeamCapacity,
+    SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamText,
+    SeamTexts, SeamWantLimits, carries, copy_table, failure_kind_code, lend_answered, lend_numbers,
+    lend_texts, read_answered, read_manifest, read_numbers, read_refusal, size_of_table,
 };
 use super::locked;
 use super::trees::{answering_of, decode};
@@ -202,6 +202,7 @@ impl HostTable {
             table: self.table,
             closed: self.closed.clone(),
             mapping: crossed.mapping,
+            carrier_ended: AtomicBool::new(false),
         });
         let Some(mapped) = Mapping::Remote(mapping.clone()).hold() else {
             return bare();
@@ -286,16 +287,26 @@ struct HostMapping {
     table: SeamContext,
     closed: Arc<AtomicBool>,
     mapping: u64,
+    carrier_ended: AtomicBool,
 }
 
 impl RemoteMapping for HostMapping {
     fn hold(&self) -> bool {
         // SAFETY: the call takes nothing but ids; the host answers 0 for a table or library it let go of.
-        !self.closed.load(Ordering::Acquire)
-            && self
-                .table
-                .hold
-                .is_some_and(|hold| unsafe { hold(self.table.data, self.mapping) } != 0)
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let answered = self.table.hold.map_or(HOLD_CLOSED, |hold| unsafe {
+            hold(self.table.data, self.mapping)
+        });
+        if answered == HOLD_CARRIER_ENDED {
+            self.carrier_ended.store(true, Ordering::Release);
+        }
+        answered == HOLD_HELD
+    }
+
+    fn carrier_ended(&self) -> bool {
+        self.carrier_ended.load(Ordering::Acquire)
     }
 
     fn unhold(&self) {

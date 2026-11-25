@@ -15,10 +15,11 @@ use super::abi::{
     ANSWER_FIRST_SHAPE, Answering, ENTRY_CALL_END, ENTRY_FIRST_SHAPE, EVENT_CAPABILITY_PROVIDED,
     EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING,
     EVENT_REACH_REFUSED, EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED,
-    EVENT_WATCH_UNREGISTERED, LentManifest, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion,
-    SeamContext, SeamEntry, SeamEvent, SeamNumber, SeamText, SeamTexts, SeamWantLimits,
-    WANT_LIMITS_FIRST_SHAPE, answered_by, carries, copy_table, failure_kind_of, lend_answered,
-    lend_numbers, lend_refusal, read_numbers, read_texts, size_of_table,
+    EVENT_WATCH_UNREGISTERED, HOLD_CARRIER_ENDED, HOLD_CLOSED, HOLD_HELD, LentManifest, SeamAnswer,
+    SeamAnswered, SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamNumber,
+    SeamText, SeamTexts, SeamWantLimits, WANT_LIMITS_FIRST_SHAPE, answered_by, carries, copy_table,
+    failure_kind_of, lend_answered, lend_numbers, lend_refusal, read_numbers, read_texts,
+    size_of_table,
 };
 use super::locked;
 use super::trees::{encode, result_of};
@@ -32,6 +33,7 @@ use crate::core::{
     Answer, DescribedDefinition, Handle, LibraryBinary, LogLevel, Number, Refusal, panic_text,
 };
 use crate::host::description::{BoundDefinition, Tree};
+use crate::host::description::{CarriedScope, ScopeCall};
 use crate::host::entry::{Entry, Finished};
 use crate::host::methods::{MethodResult, Methods};
 use crate::host::state::Host;
@@ -84,8 +86,26 @@ struct CompletionRecord {
 /// through its own binding of one.
 struct MappingRecord {
     binary: Weak<LibraryBinary>,
-    holds: Vec<Arc<LibraryBinary>>,
+    /// For a definition an answer carried, the scope of that answer, which a hold enters, so a call through the
+    /// plugin's binding is refused once the answer has ended, as one through the host's own binding is.
+    carrier: Option<Arc<CarriedScope>>,
+    holds: Vec<(Arc<LibraryBinary>, Option<ScopeCall>)>,
 }
+
+impl MappingRecord {
+    fn is_of(&self, binary: &Arc<LibraryBinary>, carrier: Option<&Arc<CarriedScope>>) -> bool {
+        std::ptr::eq(self.binary.as_ptr(), Arc::as_ptr(binary))
+            && match (&self.carrier, carrier) {
+                (None, None) => true,
+                (Some(kept), Some(carrier)) => Arc::ptr_eq(kept, carrier),
+                _ => false,
+            }
+    }
+}
+
+/// Each mapping id the host handed across, to the seam registry it lies in, so a plugin's unhold finds it whatever
+/// became of the plugin's context since its hold.
+static MAPPING_IDS: Mutex<BTreeMap<u64, Weak<SeamRegistry>>> = Mutex::new(BTreeMap::new());
 
 /// What one host keeps of the seam: each plugin's context box, each completion in flight, and each described
 /// definition with the library it lies in. Dropped with the host, which ends every id that names any of it.
@@ -101,11 +121,11 @@ impl SeamRegistry {
     /// Records the description `described` pairs with its definition, in `binary`, so a plugin across the seam binds
     /// the very definition an in-process plugin is handed.
     pub(crate) fn remember_described(
-        &self,
+        self: &Arc<Self>,
         described: &DescribedDefinition,
         binary: &Arc<LibraryBinary>,
     ) {
-        let mapping = self.mapping_of(binary);
+        let mapping = self.mapping_of(binary, None);
         let mut kept = locked(&self.described);
         kept.retain(|_, (_, known)| locked(&self.mappings).contains_key(known));
         kept.insert(
@@ -114,13 +134,18 @@ impl SeamRegistry {
         );
     }
 
-    /// The id of the mapping of `binary`, made at the first definition of it that crosses.
-    fn mapping_of(&self, binary: &Arc<LibraryBinary>) -> u64 {
+    /// The id of the mapping of `binary`, or of a definition an answer carried out of it, with `carrier` that
+    /// answer's scope, made at the first definition of it that crosses.
+    fn mapping_of(
+        self: &Arc<Self>,
+        binary: &Arc<LibraryBinary>,
+        carrier: Option<&Arc<CarriedScope>>,
+    ) -> u64 {
         let mut mappings = locked(&self.mappings);
         mappings.retain(|_, record| record.binary.strong_count() > 0);
         let known = mappings
             .iter()
-            .find(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
+            .find(|(_, record)| record.is_of(binary, carrier))
             .map(|(id, _)| *id);
         known.unwrap_or_else(|| {
             let id = next_id();
@@ -128,9 +153,13 @@ impl SeamRegistry {
                 id,
                 MappingRecord {
                     binary: Arc::downgrade(binary),
+                    carrier: carrier.cloned(),
                     holds: Vec::new(),
                 },
             );
+            let mut ids = locked(&MAPPING_IDS);
+            ids.retain(|_, registry| registry.strong_count() > 0);
+            ids.insert(id, Arc::downgrade(self));
             id
         })
     }
@@ -138,7 +167,7 @@ impl SeamRegistry {
     /// The description of `object` and the id of the library it lies in, when a description bound it; zeros otherwise.
     /// A definition an answer carried, as a scope's are, crosses with the nested description it was bound from and
     /// the library its carrier lies in.
-    fn description_of(&self, object: &Object) -> (usize, u64) {
+    fn description_of(self: &Arc<Self>, object: &Object) -> (usize, u64) {
         let Some(bound) = object.downcast_ref::<BoundDefinition>() else {
             return (0, 0);
         };
@@ -146,21 +175,34 @@ impl SeamRegistry {
             return known;
         }
         match bound.library() {
-            Some(binary) => (bound.description_address(), self.mapping_of(&binary)),
+            Some(binary) => (
+                bound.description_address(),
+                self.mapping_of(&binary, bound.carried_scope().as_ref()),
+            ),
             None => (0, 0),
         }
     }
 
-    fn hold(&self, mapping: u64) -> bool {
+    /// Holds the library of `mapping` mapped, and for a carried definition its answer's scope entered, answering
+    /// [`HOLD_HELD`], [`HOLD_CLOSED`] once the library has closed, or [`HOLD_CARRIER_ENDED`] once the answer that
+    /// carried the definition has ended.
+    fn hold(&self, mapping: u64) -> u32 {
         let mut mappings = locked(&self.mappings);
         let Some(record) = mappings.get_mut(&mapping) else {
-            return false;
+            return HOLD_CLOSED;
         };
         let Some(binary) = record.binary.upgrade() else {
-            return false;
+            return HOLD_CLOSED;
         };
-        record.holds.push(binary);
-        true
+        let call = match &record.carrier {
+            Some(carrier) => match carrier.enter() {
+                Some(call) => Some(call),
+                None => return HOLD_CARRIER_ENDED,
+            },
+            None => None,
+        };
+        record.holds.push((binary, call));
+        HOLD_HELD
     }
 
     fn unhold(&self, mapping: u64) {
@@ -173,20 +215,20 @@ impl SeamRegistry {
     /// Tells every plugin across the seam that `binary` is about to close to calls, while it is still mapped, so each
     /// releases what its own bindings of the library's definitions got.
     pub(crate) fn library_unloading(&self, binary: &Arc<LibraryBinary>) {
-        let mapping = locked(&self.mappings)
+        let mappings: Vec<u64> = locked(&self.mappings)
             .iter()
-            .find(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
-            .map(|(id, _)| *id);
-        let Some(mapping) = mapping else {
-            return;
-        };
+            .filter(|(_, record)| std::ptr::eq(record.binary.as_ptr(), Arc::as_ptr(binary)))
+            .map(|(id, _)| *id)
+            .collect();
         let boxes: Vec<Arc<ContextBox>> = locked(&self.contexts).values().cloned().collect();
-        for boxed in boxes {
-            LentEvent {
-                mapping,
-                ..LentEvent::of(EVENT_LIBRARY_UNLOADING)
+        for mapping in mappings {
+            for boxed in &boxes {
+                LentEvent {
+                    mapping,
+                    ..LentEvent::of(EVENT_LIBRARY_UNLOADING)
+                }
+                .tell(boxed, None);
             }
-            .tell(&boxed, None);
         }
     }
 
@@ -214,6 +256,20 @@ impl SeamRegistry {
     }
 
     /// How many contexts and completions it keeps now: what a test reads to prove each is let go of at its end.
+    /// How many holds the mapping `mapping` keeps now.
+    #[cfg(test)]
+    pub(super) fn hold_count(&self, mapping: u64) -> usize {
+        locked(&self.mappings)
+            .get(&mapping)
+            .map_or(0, |record| record.holds.len())
+    }
+
+    /// The id of every plugin's context box it keeps.
+    #[cfg(test)]
+    pub(super) fn context_ids(&self) -> Vec<u64> {
+        locked(&self.contexts).keys().copied().collect()
+    }
+
     /// How many objects' methods the plugins said they offer and no registration or provide has taken yet.
     #[cfg(test)]
     pub(super) fn offered_method_count(&self) -> usize {
@@ -1208,6 +1264,25 @@ unsafe extern "C" fn context_implementations(data: u64, id: SeamText, answer: *c
 ///
 /// # Safety
 /// Nothing: the call reads no answer.
+/// Gets `id` through the context table of the box `data` and holds the mapping its definition crossed with, as a
+/// plugin's binding does at a call, answering that mapping.
+#[cfg(test)]
+pub(super) fn get_and_hold(data: u64, id: &str) -> u64 {
+    // SAFETY: the id and the answer live for the call.
+    let got = answered_by(|answer| unsafe { context_get(data, SeamText::of(id), answer) })
+        .expect("the get answers");
+    // SAFETY: the call takes nothing but ids.
+    assert_eq!(unsafe { context_hold(data, got.mapping) }, HOLD_HELD);
+    got.mapping
+}
+
+/// Lets go of one hold of `mapping` through the context table of the box `data`, as a plugin's binding does.
+#[cfg(test)]
+pub(super) fn unhold(data: u64, mapping: u64) {
+    // SAFETY: the call takes nothing but ids.
+    unsafe { context_unhold(data, mapping) };
+}
+
 #[cfg(test)]
 pub(super) unsafe fn call_get_without_an_answer() {
     // SAFETY: the id lives for the call, and a NULL answer is what is under test.
@@ -1219,16 +1294,18 @@ unsafe extern "C" fn context_hold(data: u64, mapping: u64) -> u32 {
     catch_unwind(|| {
         box_of(data)
             .and_then(|boxed| boxed.registry.upgrade())
-            .is_some_and(|registry| registry.hold(mapping))
+            .map_or(HOLD_CLOSED, |registry| registry.hold(mapping))
     })
-    .map(u32::from)
-    .unwrap_or(0)
+    .unwrap_or(HOLD_CLOSED)
 }
 
-unsafe extern "C" fn context_unhold(data: u64, mapping: u64) {
+/// Lets go of one hold, found by the mapping id alone, so a hold made while the plugin's context lived is let go of
+/// after its host let go of that context too.
+unsafe extern "C" fn context_unhold(_: u64, mapping: u64) {
     let _call = CallFromAPlugin::enter();
     let _ = catch_unwind(|| {
-        if let Some(registry) = box_of(data).and_then(|boxed| boxed.registry.upgrade()) {
+        let registry = locked(&MAPPING_IDS).get(&mapping).and_then(Weak::upgrade);
+        if let Some(registry) = registry {
             registry.unhold(mapping);
         }
     });

@@ -273,6 +273,11 @@ impl BoundDefinition {
         self.inner.binding.description.address
     }
 
+    /// The scope of the answer that carried it, none for a definition no answer carried.
+    pub(crate) fn carried_scope(&self) -> Option<Arc<CarriedScope>> {
+        self.inner.environment.scope.clone()
+    }
+
     /// The binary of the library it lies in, while that binary is open; none for one bound with no library.
     pub(crate) fn library(&self) -> Option<Arc<crate::core::LibraryBinary>> {
         match &self.inner.environment.mapping {

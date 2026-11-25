@@ -522,3 +522,70 @@ fn the_methods_a_plugin_offers_are_kept_no_longer_than_the_registration_they_wer
     assert_eq!(host.shared.seam.offered_method_count(), 0);
     host.destroy().wait();
 }
+
+#[test]
+fn a_hold_made_through_a_context_is_let_go_of_after_the_host_let_go_of_that_context() {
+    use crate::host::{
+        FunctionKind, LibraryDeclaration, LibraryFunction, LibraryServiceDeclaration,
+    };
+    let native = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build")
+        .join("native");
+    let library = |name: &str| native.join(format!("{DLL_PREFIX}{name}{DLL_SUFFIX}"));
+    let check = crate::standard::StandardDescriptions::load(library("weivel_standard"))
+        .expect("the standard's checks load");
+    let host = Host::create(
+        &core_binary(),
+        HostOptions {
+            scheduler: HostScheduler::NoClock,
+            description_check: Some(Arc::new(check)),
+            ..HostOptions::default()
+        },
+    )
+    .unwrap();
+    let declaration = LibraryDeclaration {
+        import_name: "described".to_owned(),
+        version: "1.0.0".to_owned(),
+        release: None,
+        services: vec![LibraryServiceDeclaration {
+            id: "described-mirror".to_owned(),
+            functions: vec![LibraryFunction {
+                name: "definition".to_owned(),
+                symbol: "described_mirror_definition".to_owned(),
+                kind: FunctionKind::Definition,
+                context: 0,
+            }],
+            description: Some("described_mirror_description".to_owned()),
+        }],
+        contracts: Vec::new(),
+    };
+    let _loaded = host
+        .load_library(&library("weivel_standard_described"), &declaration)
+        .expect("the described library loads");
+    let entry = host
+        .load_entry(&library("weivel_test_plugins"), Some("methods_entry"))
+        .expect("the plugin loads");
+    let manifest = Manifest {
+        import_name: "holder".to_owned(),
+        services_consumed: vec![crate::core::ServiceWant {
+            id: "described-mirror".to_owned(),
+            provider: None,
+            optional: Some(true),
+            degradable: None,
+            constraints: Vec::new(),
+        }],
+        ..Manifest::default()
+    };
+    let plugin = host.register(manifest, entry).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    drop(activation.outcomes[0].wait());
+    let registry = host.shared.seam.clone();
+    let context = registry.context_ids()[0];
+    let mapping = super::host_side::get_and_hold(context, "described-mirror");
+    assert_eq!(registry.hold_count(mapping), 1);
+    assert_eq!(host.release(plugin).wait(), Ok(true));
+    assert!(registry.context_ids().is_empty());
+    super::host_side::unhold(context, mapping);
+    assert_eq!(registry.hold_count(mapping), 0);
+    host.destroy().wait();
+}
