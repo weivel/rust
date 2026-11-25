@@ -17,7 +17,8 @@ starts each plugin in its order: builds its context, opens it and calls its acti
 starting the next, and returns the plan and each plugin's outcome to come. Where no dispatch runs, the activating
 thread starts the plan as the dispatcher, so what an activate's own calls queue is dispatched once every activate of
 the plan has been called; an activate therefore must not wait for a result such a dispatch would settle, and
-`Pending::wait` on a dispatching thread panics rather than hangs. An activate that settles before it returns is
+`Pending::wait` for one of the crate's own results on the thread dispatching the core that settles it panics rather
+than hangs, as does a wait inside a plugin's activate for that plugin's own release. An activate that settles before it returns is
 verified, or quarantined when the core refuses, before the next plugin is started. An outcome is `Active`,
 `Quarantined`, `Refused`, `Released` or `Failed`, and carries the core's refusal that decided it; an open the core
 answers destroyed is `Released`.
@@ -65,15 +66,29 @@ Rust has no stable ABI, so a plugin built as a library of its own, a `cdylib` wi
 reached through size-prefixed C tables of `extern "C"` functions, never through Rust types. The plugin exports its
 entry with `weivel_rust::export_entry!`, under `weivel_rust_entry` or a symbol of its choosing, and
 `Host::load_entry(path, symbol)` answers an `Entry` the host registers as any other. Each activate is handed the host's
-context table of its plugin, which the plugin's side wraps in the same safe `Context`. A service object crosses as its
-provider's address, so identity is the address: a consumer in the host's binary receives a `ForeignObject` or, for a
-described definition, its `BoundDefinition`, a plugin across the seam receives the address of the host's own object, and a typed view of one is a `#[repr(C)]` struct both
-sides compile. Every function on both sides catches a panic: a panic in a plugin's activate or deactivate is told to
-the host's error sink and finishes it as failed, so the host quarantines that plugin and goes on. The library stays
-open until the host is freed, since a plugin's code may still run after its release.
+context table of its plugin and its whole manifest, which the plugin's side wraps in the same safe `Context`: every call
+of a context crosses, gets, wants and their withdrawal, watches of services and of capabilities, the listing of ids
+and of implementations, registrations awaiting releases or not and with a capacity answerer or not, unregistrations,
+releases of a holding and capabilities provided, the log and the error sink with every kind of failure, and every
+event about the plugin. A service object crosses as its provider's address, so identity is the address: a consumer in
+the host's binary receives a `ForeignObject` or a `BoundDefinition`, a plugin across the seam receives the address of
+the host's own object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct
+both sides compile. A described definition crosses with the description its library answered, so the plugin's side
+binds it into a `BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose
+operations it calls as an in-process plugin does; that copy holds nothing of the host's, so a call through it after
+the library's unload is the plugin's defect, as a call through any definition after its holding ended is.
 
-The first tables carry a get, a registration, awaiting releases or not, an unregistration, a release of a holding, a
-capability provided, the log and the error sink, and the events of a revocation and of holdings released. A context
-across the seam answers a want, a watch, a listing of ids or of implementations, and a capacity answerer as the
-caller's mistake, since its table carries no function for them, and its manifest carries the plugin's import name
-alone.
+Each table is led by its `size`. A side refuses a table below its first shape, the fields it was first published with,
+reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either
+side may append fields without breaking the other. Neither side keeps a pointer into the other's memory past a call:
+each table it receives is copied, every text and list is lent for one call, of any length, and a call's answer is
+handed to the caller's own receiver before the call returns. A context and a completion cross as the host's id of
+them, found in the host's registry, so a call or a finish after the host let go of either answers destroyed or does
+nothing. When the host forgets a plugin it lets go of what it kept of it and tells the plugin's side to close and
+detach that context; when the host drops an entry it tells the plugin's side to free its table, and the library closes
+once every entry loaded from it is dropped.
+
+Every function on both sides catches a panic: a panic in a plugin's activate or deactivate is told to the host's error
+sink and finishes it as failed, so the host quarantines that plugin and goes on. A want made across the seam knows
+whether the calling thread dispatches the host's core, so a plugin waiting for it there panics rather than hangs, as
+an in-process one does.

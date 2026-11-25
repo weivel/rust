@@ -44,6 +44,4 @@ pub use values::{
 pub use wrapper::{
     Core, ErrorSink, Failure, FailureKind, Listener, ListenerRegistration, Wrapping,
 };
-pub(crate) use wrapper::{
-    DeadlineHooks, Hold, HooksRegistration, panic_text, this_thread_dispatches,
-};
+pub(crate) use wrapper::{DeadlineHooks, Hold, HooksRegistration, panic_text};

@@ -70,7 +70,8 @@ answer carrying a definition; an answer naming no release, as a text the provide
 - **Enums by name.** `BoundDefinition::enums` answers the `DescribedEnums` of its description, each enum by the name its
   header spells holding its entries' numbers by name, with `weivel_status` beside them as `core.h` spells it. A plugin
   reads them through its context, `Context::enums_of(object)`, which answers none for an object no description bound,
-  a definition reached across the plugin seam among them, and `Context::require_enums(enums, names, of)` answers exactly
+  and the same enums for a definition reached across the plugin seam, which the plugin's side binds again from the
+  description the host hands beside it, and `Context::require_enums(enums, names, of)` answers exactly
   the enums and entries it names, the caller's mistake naming the first one the description lacks, so a name it does
   not carry stops its reader rather than reading as missing in every comparison.
 - **Blocking is reported, not acted on.** `BoundDefinition::blocking_operations` names the operations the description

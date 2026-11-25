@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use super::enums::DescribedEnums;
 use super::link::{Link, SeamCalls};
 use super::log::PluginLog;
-use super::records::{Object, PluginEvent, PluginListener, address_of};
+use super::records::{Object, PluginEvent, PluginListener};
 use super::state::ContextState;
 use crate::core::{Answer, FailureKind, Handle, Manifest};
 use crate::host::BoundDefinition;
@@ -21,9 +21,6 @@ pub(crate) struct ContextInner {
     token: AtomicU64,
     detached: AtomicBool,
     silenced: AtomicBool,
-    /// What a context across the plugin seam registered or provided, kept alive while the context lives, since the
-    /// host holds only their addresses.
-    crossed: Mutex<Vec<Object>>,
 }
 
 /// What a plugin sees of the core, and the only way it reaches any of it: services to get, want, watch, list and
@@ -88,7 +85,6 @@ impl Context {
                 token: AtomicU64::new(0),
                 detached: AtomicBool::new(false),
                 silenced: AtomicBool::new(false),
-                crossed: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -124,8 +120,9 @@ impl Context {
     }
 
     /// The enums of the description that bound `service`, each by the name its header spells, with `weivel_status`
-    /// beside them; none for an object no description bound, as one a plugin registered or a definition across the
-    /// plugin seam. A plugin reads an enum's numbers here rather than copying them from a header.
+    /// beside them; none for an object no description bound, as one a plugin registered. A definition reached across
+    /// the plugin seam is bound on the plugin's side from its description, so it answers the same enums. A plugin reads
+    /// an enum's numbers here rather than copying them from a header.
     pub fn enums_of(&self, service: &Object) -> Option<DescribedEnums> {
         service
             .downcast_ref::<BoundDefinition>()
@@ -193,9 +190,9 @@ impl Context {
         }
     }
 
-    /// The object this context handed across the seam at `address`, if it handed one.
-    pub(crate) fn crossed_at(&self, address: usize) -> Option<Object> {
-        self.inner.crossed_at(address)
+    /// Whether this thread runs the dispatch that settles what this context's calls answer later.
+    pub(crate) fn dispatches_here(&self) -> bool {
+        self.inner.link.dispatches_here()
     }
 
     /// Tells the host's error sink.
@@ -221,23 +218,5 @@ impl ContextInner {
 
     pub(crate) fn is_detached(&self) -> bool {
         self.detached.load(Ordering::Acquire)
-    }
-
-    /// Keeps an object a context across the seam handed the host by its address.
-    pub(crate) fn keep_crossed(&self, object: Object) {
-        self.crossed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(object);
-    }
-
-    /// The object this context handed across the seam at `address`, if it handed one.
-    pub(crate) fn crossed_at(&self, address: usize) -> Option<Object> {
-        self.crossed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|object| address_of(object) == address)
-            .cloned()
     }
 }

@@ -8,6 +8,8 @@ use std::task::{Context as TaskContext, Poll, Waker};
 
 type Callback<T> = Box<dyn FnOnce(&T) + Send>;
 
+const WAITED_FOR_GOOD: &str = "a result was waited for on a thread that runs what settles it, so it would never settle; hand it a callback with on_settled instead";
+
 enum Slot<T> {
     Waiting {
         callbacks: Vec<Callback<T>>,
@@ -16,9 +18,14 @@ enum Slot<T> {
     Settled(Arc<T>),
 }
 
+/// Whether waiting for a result on this thread now would wait for good, because what settles it cannot run until the
+/// wait returns.
+pub(crate) type WouldWaitForGood = Arc<dyn Fn() -> bool + Send + Sync>;
+
 struct Shared<T> {
     slot: Mutex<Slot<T>>,
     settled: Condvar,
+    would_wait_for_good: Option<WouldWaitForGood>,
 }
 
 impl<T> Shared<T> {
@@ -59,12 +66,24 @@ pub struct Settle<T> {
 
 /// A result to come and what settles it.
 pub fn pending<T>() -> (Pending<T>, Settle<T>) {
+    pending_unless(None)
+}
+
+/// A result to come that one of the crate's own steps settles, and what tells a wait that it would wait for good.
+pub(crate) fn pending_settled_by<T>(
+    would_wait_for_good: WouldWaitForGood,
+) -> (Pending<T>, Settle<T>) {
+    pending_unless(Some(would_wait_for_good))
+}
+
+fn pending_unless<T>(would_wait_for_good: Option<WouldWaitForGood>) -> (Pending<T>, Settle<T>) {
     let shared = Arc::new(Shared {
         slot: Mutex::new(Slot::Waiting {
             callbacks: Vec::new(),
             wakers: Vec::new(),
         }),
         settled: Condvar::new(),
+        would_wait_for_good,
     });
     (
         Pending {
@@ -115,20 +134,24 @@ impl<T: Clone> Pending<T> {
     ///
     /// # Panics
     ///
-    /// On a thread that is dispatching a core's queue, or running a step as its dispatcher, while the result is not
-    /// settled: what settles it is most often that very dispatch, which would then never go on, so such a caller
-    /// hands the result a callback instead.
+    /// When the result is one of the crate's and is not settled, while what settles it cannot run until this wait
+    /// returns: on a thread dispatching the core whose dispatch settles it, or for a release asked from inside the
+    /// released plugin's own activate, which the release waits for. Such a caller hands the result a callback.
+    /// A result the caller made with [`pending`] carries no such knowledge and is waited for as asked.
     pub fn wait(&self) -> T {
         let mut slot = self.shared.lock();
         loop {
             if let Slot::Settled(value) = &*slot {
                 return T::clone(value);
             }
-            if crate::core::this_thread_dispatches() {
+            if self
+                .shared
+                .would_wait_for_good
+                .as_ref()
+                .is_some_and(|would_wait_for_good| would_wait_for_good())
+            {
                 drop(slot);
-                panic!(
-                    "a result that has not settled was waited for on a thread dispatching the core's queue, which                      would never settle it; hand it a callback with on_settled instead"
-                );
+                panic!("{WAITED_FOR_GOOD}");
             }
             slot = self
                 .shared

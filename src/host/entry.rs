@@ -24,6 +24,12 @@ pub trait Entry: Send + Sync {
     fn deactivate(&self) -> Option<Pending<Finished>> {
         None
     }
+
+    /// Hears that the host forgot the plugin of `context`, the last step of its release: nothing of the host's
+    /// reaches the entry about that plugin afterwards. An entry that holds nothing per plugin ignores it.
+    fn forgotten(&self, context: &Context) {
+        let _ = context;
+    }
 }
 
 /// Where one plugin's activation ended.

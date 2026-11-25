@@ -4,6 +4,7 @@
 
 use std::ffi::{CString, c_void};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use super::shapes::DriverFailure;
@@ -65,15 +66,12 @@ pub(crate) fn echo_through(address: usize, text: &str) -> Result<String, DriverF
     String::from_utf8(answered).map_err(|_| "the definition's echo answered no UTF-8".to_owned())
 }
 
-/// Hands the library a counter it adds one to when its binary is closed. The counter outlives every binary, since a
-/// binary may close as late as the host's destroy.
-pub(crate) fn count_unloads(
-    address: usize,
-    counter: &'static AtomicU64,
-) -> Result<(), DriverFailure> {
+/// Hands the library a counter it adds one to when its binary is closed, which the caller keeps until the host that
+/// loaded the binary is destroyed, the latest the binary closes.
+pub(crate) fn count_unloads(address: usize, counter: &Arc<AtomicU64>) -> Result<(), DriverFailure> {
     // SAFETY: as for `echo_through`.
     let definition = unsafe { definition_at(address)? };
-    // SAFETY: the counter is a `u64` that lives for the process, as `echo.h` asks.
+    // SAFETY: the counter is a `u64` its caller keeps past the binary's close, as `echo.h` asks.
     unsafe { (definition.count_unloads)(definition.context, counter.as_ptr()) };
     Ok(())
 }

@@ -161,3 +161,219 @@ fn an_entry_symbol_the_library_lacks_is_the_callers_mistake() {
     assert!(matches!(loaded, Err(Answer::Mistake(_))));
     host.destroy().wait();
 }
+
+fn texts_written_by(kept: &crate::Kept, plugin: &str) -> Vec<String> {
+    kept.logs()
+        .into_iter()
+        .filter(|record| record.plugin.as_deref() == Some(plugin))
+        .map(|record| record.text)
+        .collect()
+}
+
+/// Holds what it gets and lets go as soon as it is revoked awaiting its release.
+#[derive(Default)]
+struct HoldsAndLetsGo {
+    released: Arc<Mutex<Vec<Result<bool, Answer>>>>,
+}
+
+impl Entry for HoldsAndLetsGo {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let held = context.get("owner:feed");
+        let releasing = context.clone();
+        let released = self.released.clone();
+        context.listen(move |event| {
+            if let weivel_rust::context::PluginEvent::Revoked(revocation) = event {
+                released
+                    .lock()
+                    .unwrap()
+                    .push(releasing.release_holding(revocation));
+            }
+        });
+        Pending::settled(held.map(|_| ()).map_err(|refused| refused.to_string()))
+    }
+}
+
+#[test]
+fn a_registration_awaiting_releases_across_the_seam_hears_its_holder_let_go_in_its_deactivate() {
+    let (host, kept) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let owning = host
+        .load_entry(&plugins_library(), Some("owning_entry"))
+        .expect("the owning plugin loads");
+    let holding = Arc::new(HoldsAndLetsGo::default());
+    let owner = host
+        .register(manifest("owner", &["owner:feed"], &[]), owning)
+        .unwrap();
+    let holder = host
+        .register(manifest("holder", &[], &["owner:feed"]), holding.clone())
+        .unwrap();
+    let activation = host
+        .activate(&[owner, holder], EdgeSource::SERVICES)
+        .unwrap();
+    let states: Vec<_> = activation
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.wait().state)
+        .collect();
+    assert_eq!(
+        states,
+        vec![ActivationState::Active; 2],
+        "{:?}",
+        kept.failures()
+    );
+    assert_eq!(host.release(owner).wait(), Ok(true));
+    assert_eq!(*holding.released.lock().unwrap(), vec![Ok(true)]);
+    let written = texts_written_by(&kept, "owner");
+    assert!(written.contains(&"deactivating".to_owned()), "{written:?}");
+    assert!(
+        written.contains(&"holdings released owner:feed".to_owned()),
+        "{written:?}"
+    );
+    host.destroy().wait();
+}
+
+#[test]
+fn a_refusal_and_a_long_text_cross_the_seam_whole() {
+    let (host, kept) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let owning = host
+        .load_entry(&plugins_library(), Some("owning_entry"))
+        .expect("the owning plugin loads");
+    let owner = host
+        .register(manifest("owner", &["owner:feed"], &[]), owning)
+        .unwrap();
+    host.activate(&[owner], EdgeSource::SERVICES).unwrap();
+    let written = texts_written_by(&kept, "owner");
+    let refused = written
+        .iter()
+        .find(|text| text.starts_with("refused "))
+        .expect("the owner wrote the refusal its get met");
+    assert!(refused.contains("declined"), "{refused}");
+    assert!(
+        written.contains(&"reach refused nobody:here Some(\"nobody:here\")".to_owned()),
+        "{written:?}"
+    );
+    assert!(
+        written
+            .iter()
+            .any(|text| text.len() == 4096 && text.bytes().all(|byte| byte == b'x'))
+    );
+    host.destroy().wait();
+}
+
+#[test]
+fn a_plugin_across_the_seam_lets_go_of_a_c_definition_it_hears_revoked() {
+    let _turn = crate::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (host, kept) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let declaration = weivel_rust::host::LibraryDeclaration {
+        import_name: "echo".to_owned(),
+        version: "0.2.0".to_owned(),
+        release: None,
+        services: vec![weivel_rust::host::LibraryServiceDeclaration {
+            id: "echo".to_owned(),
+            functions: vec![weivel_rust::host::LibraryFunction {
+                name: "definition".to_owned(),
+                symbol: "echo_service_definition".to_owned(),
+                kind: weivel_rust::host::FunctionKind::Definition,
+                context: 0,
+            }],
+            description: None,
+        }],
+        contracts: Vec::new(),
+    };
+    let loaded = host
+        .load_library(&shared_library("echo"), &declaration)
+        .expect("the echo library loads");
+    let definition = address_of(&loaded.services()[0].1);
+    let holding = host
+        .load_entry(&plugins_library(), Some("holding_entry"))
+        .expect("the holding plugin loads");
+    let holder = host
+        .register(manifest("holder", &[], &["echo"]), holding)
+        .unwrap();
+    let activation = host.activate(&[holder], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    assert_eq!(host.unload_library(&loaded), Ok(true));
+    let written = texts_written_by(&kept, "holder");
+    assert_eq!(
+        written,
+        vec![
+            format!("holds echo at {definition}"),
+            "released Ok(true)".to_owned()
+        ]
+    );
+    host.destroy().wait();
+}
+
+#[test]
+fn a_plugin_across_the_seam_waiting_on_the_dispatching_thread_is_quarantined_rather_than_hung() {
+    let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let waiting = host
+        .load_entry(&plugins_library(), Some("waiting_entry"))
+        .expect("the waiting plugin loads");
+    let plugin = host
+        .register(manifest("waiting", &[], &["provider:probe"]), waiting)
+        .unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Quarantined
+    );
+    let ledger = host.ledger().unwrap();
+    let row = ledger
+        .iter()
+        .find(|row| row.import_name == "waiting")
+        .unwrap();
+    assert!(
+        row.refusal.detail.contains("would never settle"),
+        "{:?}",
+        row.refusal
+    );
+    host.destroy().wait();
+}
+
+#[test]
+fn a_plugin_across_the_seam_reads_a_bound_definitions_enums_and_calls_it_as_an_in_process_plugin_does()
+ {
+    let _turn = crate::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let check =
+        weivel_rust::standard::StandardDescriptions::load(shared_library("weivel_standard"))
+            .expect("the standard's description checks load");
+    let (host, kept) = kept_host(
+        HostScheduler::NoClock,
+        HostOptions {
+            description_check: Some(Arc::new(check)),
+            ..HostOptions::default()
+        },
+    );
+    let _loaded = host
+        .load_library(
+            &shared_library("weivel_standard_described"),
+            &crate::libraries::described_declaration("described_walker_description"),
+        )
+        .expect("the described library loads");
+    let describing = host
+        .load_entry(&plugins_library(), Some("describing_entry"))
+        .expect("the describing plugin loads");
+    let plugin = host
+        .register(manifest("reader", &[], &["described-mirror"]), describing)
+        .unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    let written = texts_written_by(&kept, "reader");
+    assert_eq!(written[0], "shade Some(2)");
+    assert!(written[1].contains("I64(-5)"), "{written:?}");
+    host.destroy().wait();
+}

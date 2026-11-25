@@ -183,28 +183,29 @@ struct FollowingTurn {
 }
 
 thread_local! {
-    static DISPATCHES_HERE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DISPATCHED_HERE: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Marks this thread as dispatching for as long as it lives.
-struct DispatchingHere;
+/// Marks this thread as dispatching one core's queue for as long as it lives.
+struct DispatchingHere(usize);
 
 impl DispatchingHere {
-    fn enter() -> DispatchingHere {
-        DISPATCHES_HERE.with(|depth| depth.set(depth.get() + 1));
-        DispatchingHere
+    fn enter(core: &Core) -> DispatchingHere {
+        let marked = core.identity();
+        DISPATCHED_HERE.with(|cores| cores.borrow_mut().push(marked));
+        DispatchingHere(marked)
     }
 }
 
 impl Drop for DispatchingHere {
     fn drop(&mut self) {
-        DISPATCHES_HERE.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        DISPATCHED_HERE.with(|cores| {
+            let mut cores = cores.borrow_mut();
+            if let Some(at) = cores.iter().rposition(|marked| *marked == self.0) {
+                cores.remove(at);
+            }
+        });
     }
-}
-
-/// Whether this thread is dispatching a core's queue now, or running a step as its dispatcher.
-pub(crate) fn this_thread_dispatches() -> bool {
-    DISPATCHES_HERE.with(|depth| depth.get() > 0)
 }
 
 pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
@@ -364,6 +365,17 @@ impl Core {
         Ok(state)
     }
 
+    fn identity(&self) -> usize {
+        Arc::as_ptr(&self.shared) as usize
+    }
+
+    /// Whether this thread is dispatching this core's queue now, or running a step as its dispatcher: a result such a
+    /// dispatch settles is never waited for on it.
+    pub(crate) fn dispatches_here(&self) -> bool {
+        let identity = self.identity();
+        DISPATCHED_HERE.with(|cores| cores.borrow().contains(&identity))
+    }
+
     /// Tells the sink, and standard error when the sink itself panics.
     pub(crate) fn report(&self, told: &Failure) {
         let sink = &self.shared.sink;
@@ -429,7 +441,7 @@ impl Core {
             }
             state.dispatching = true;
         }
-        let _dispatching = DispatchingHere::enter();
+        let _dispatching = DispatchingHere::enter(self);
         if let Err(payload) = catch_unwind(AssertUnwindSafe(step)) {
             self.report(&failure(
                 FailureKind::Step,
@@ -591,7 +603,7 @@ impl Core {
 
     /// Delivers the queue until it is empty or reaches a fence. Only the thread that claimed the dispatch is here.
     fn dispatch(&self) {
-        let _dispatching = DispatchingHere::enter();
+        let _dispatching = DispatchingHere::enter(self);
         while let Some(queued) = self.take_next() {
             match queued {
                 Queued::Step(step) => self.run_step(step),

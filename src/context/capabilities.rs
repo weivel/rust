@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::link::Link;
 use super::plugin::Context;
-use super::records::{CapabilityWatcher, Object, Record, Table, address_of};
+use super::records::{CapabilityWatcher, Object, Record, Table};
 use super::services::Watching;
 use super::state::ContextState;
 use crate::core::{Answer, CapabilityImplementation, FailureKind, Handle};
@@ -63,11 +63,7 @@ impl Context {
     pub fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer> {
         let state = match &self.inner.link {
             Link::Local(state) => state,
-            Link::Seam(seam) => {
-                seam.provide(id, address_of(&implementation))?;
-                self.inner.keep_crossed(implementation);
-                return Ok(());
-            }
+            Link::Seam(seam) => return seam.provide(id, implementation),
         };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
@@ -88,10 +84,10 @@ impl Context {
     /// The verified implementations of the capability `id`, each the provider's own object, in the core's order. An
     /// implementation the crate holds no object for is left out and the error sink told.
     pub fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer> {
-        let state = self
-            .inner
-            .link
-            .local("listing a capability's implementations")?;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => return seam.implementations(id),
+        };
         let plugin = self.plugin();
         let mut room = FIRST_LISTING_ROOM;
         loop {
@@ -123,7 +119,15 @@ impl Context {
         id: &str,
         watcher: Arc<dyn CapabilityWatcher>,
     ) -> Result<Watching, Answer> {
-        let state = self.inner.link.local("a capability watch")?;
+        let state = match &self.inner.link {
+            Link::Local(state) => state,
+            Link::Seam(seam) => {
+                return Ok(Watching::new(
+                    self.clone(),
+                    seam.watch_capability(id, watcher)?,
+                ));
+            }
+        };
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let watch = state.call(&self.inner, |hold| {

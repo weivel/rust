@@ -294,6 +294,7 @@ impl Host {
             };
             let described = binary.described(symbol, address)?;
             check.check(&described)?;
+            super::seam::remember_described(&described, binary);
             let mapping = Mapping::Library(Arc::downgrade(binary));
             let bound =
                 bind_described(&described, mapping, holdings.clone()).map_err(Answer::Mistake)?;

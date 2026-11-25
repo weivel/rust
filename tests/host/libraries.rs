@@ -1,7 +1,7 @@
 //! C libraries as host services beyond what the layer vectors witness: descriptions checked by the standard, a
 //! library of contracts alone, ids the host holds already, and bytes services after an unload.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use weivel_rust::context::Object;
 use weivel_rust::core::Answer;
@@ -15,8 +15,7 @@ use weivel_rust::standard::StandardDescriptions;
 use crate::kept_host;
 use crate::support::shared_library;
 
-/// A process maps a library once however often it is opened, so these tests take turns with each other.
-pub static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+pub use crate::ONE_AT_A_TIME;
 
 fn function(name: &str, symbol: &str, kind: FunctionKind) -> LibraryFunction {
     LibraryFunction {

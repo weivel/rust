@@ -154,6 +154,8 @@ pub(crate) struct DriverWorld {
     kept: Arc<Kept>,
     plugins: BTreeMap<String, Handle>,
     order: Vec<String>,
+    /// What must outlive the host's destroy, dropped with the world after it.
+    until_destroyed: Vec<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl DriverWorld {
@@ -189,7 +191,17 @@ impl DriverWorld {
             kept,
             plugins: BTreeMap::new(),
             order: Vec::new(),
+            until_destroyed: Vec::new(),
         })
+    }
+
+    /// Keeps `kept` until the world is dropped, which is after its host's destroy.
+    pub(crate) fn keep_until_destroyed<T: Send + Sync + 'static>(
+        &mut self,
+        kept: Arc<T>,
+    ) -> Arc<T> {
+        self.until_destroyed.push(kept.clone());
+        kept
     }
 
     /// Registers a plugin through the host, failing unless the core registered it.

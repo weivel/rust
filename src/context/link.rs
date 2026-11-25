@@ -5,27 +5,48 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use super::log::LogRecord;
+use super::records::{
+    CapabilityWatcher, CapacityAnswerer, Object, Revocation, ServiceWatcher, WantRecord,
+};
+use super::services::WantLimits;
 use super::state::ContextState;
 use crate::core::{Answer, FailureKind, Handle, LogLevel, panic_text};
 
-/// The calls the plugin seam's context table carries, as the seam's plugin side wraps that table. A context across
-/// the seam answers every other call as the caller's mistake, since the host's table carries no function for it.
+/// Every call a context makes, as the plugin seam's plugin side carries it over the host's context table. The objects
+/// handed in are kept on the plugin's side, the host holding only their addresses.
 pub(crate) trait SeamCalls: Send + Sync {
-    /// The address of the provider's object registered under `id`.
-    fn get(&self, id: &str) -> Result<usize, Answer>;
-    /// Registers the object at `address` under `id`, awaiting releases when asked.
-    fn register(&self, id: &str, address: usize, awaiting_releases: bool)
-    -> Result<Handle, Answer>;
-    /// Unregisters a registration this plugin made.
+    fn get(&self, id: &str) -> Result<Object, Answer>;
+    fn ids(&self) -> Result<Vec<String>, Answer>;
+    /// Makes a want whose settlement `record` receives, answering the plugin's own id of it.
+    fn want(
+        &self,
+        id: &str,
+        limits: &WantLimits,
+        record: Arc<WantRecord>,
+    ) -> Result<Handle, Answer>;
+    fn withdraw(&self, want: Handle) -> Result<(), Answer>;
+    fn watch(&self, id: &str, watcher: Arc<dyn ServiceWatcher>) -> Result<Handle, Answer>;
+    fn watch_capability(
+        &self,
+        id: &str,
+        watcher: Arc<dyn CapabilityWatcher>,
+    ) -> Result<Handle, Answer>;
+    fn stop_watch(&self, watch: Handle) -> Result<(), Answer>;
+    fn register(
+        &self,
+        id: &str,
+        service: Object,
+        awaiting_releases: bool,
+        answerer: Option<Arc<dyn CapacityAnswerer>>,
+    ) -> Result<Handle, Answer>;
     fn unregister(&self, registration: Handle) -> Result<(), Answer>;
-    /// Lets go of a holding of `registration` this plugin heard revoked awaiting its release.
-    fn release_holding(&self, registration: Handle) -> Result<bool, Answer>;
-    /// Provides the object at `address` as an implementation of the capability `id`.
-    fn provide(&self, id: &str, address: usize) -> Result<(), Answer>;
-    /// Writes to the host's log under the plugin's name.
+    fn release_holding(&self, revocation: &Revocation) -> Result<bool, Answer>;
+    fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer>;
+    fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer>;
     fn write(&self, level: LogLevel, text: &str);
-    /// Tells the host's error sink.
     fn report(&self, kind: FailureKind, text: &str);
+    /// Whether this thread dispatches the host's core now, so a result only its dispatch settles would never settle.
+    fn dispatches_here(&self) -> bool;
 }
 
 #[derive(Clone)]
@@ -34,21 +55,7 @@ pub(crate) enum Link {
     Seam(Arc<dyn SeamCalls>),
 }
 
-pub(crate) fn not_carried(what: &str) -> Answer {
-    Answer::Mistake(format!(
-        "{what} is not carried by the plugin seam: the host's context table has no function for it"
-    ))
-}
-
 impl Link {
-    /// The contexts' shared state, or why a context across the seam cannot make the call `what` names.
-    pub(crate) fn local(&self, what: &str) -> Result<&Arc<ContextState>, Answer> {
-        match self {
-            Link::Local(state) => Ok(state),
-            Link::Seam(_) => Err(not_carried(what)),
-        }
-    }
-
     pub(crate) fn write(&self, record: &LogRecord) {
         match self {
             Link::Local(state) => state.write(record),
@@ -65,6 +72,14 @@ impl Link {
                     seam.report(kind, &format!("{text}: {}", panic_text(&*payload)));
                 }
             }
+        }
+    }
+
+    /// Whether this thread runs the dispatch that settles what this context's calls answer later.
+    pub(crate) fn dispatches_here(&self) -> bool {
+        match self {
+            Link::Local(state) => state.core.dispatches_here(),
+            Link::Seam(seam) => seam.dispatches_here(),
         }
     }
 }

@@ -2,41 +2,32 @@
 //! through size-prefixed C tables of `extern "C"` functions rather than Rust types, since two separately built copies
 //! of this crate agree on no Rust layout. A service object crosses as its provider's address, identity being the
 //! address, and a typed view of one is a `#[repr(C)]` definition both sides compile.
+//!
+//! Neither side keeps a pointer into the other's memory past a call: each table it receives is copied, every text and
+//! array is lent for one call, and a context or a completion crosses as the host's id of it, so a call through either
+//! after the host let go of it finds nothing and answers destroyed.
 
 mod abi;
 mod host_side;
 mod plugin_side;
+#[cfg(test)]
+mod tests;
 
 use std::sync::{Mutex, MutexGuard};
 
-pub use abi::{SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamText};
+pub use abi::{
+    SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent,
+    SeamManifest, SeamNumber, SeamOffer, SeamRefusal, SeamText, SeamTexts, SeamWant,
+    SeamWantLimits,
+};
 pub use host_side::DEFAULT_ENTRY_SYMBOL;
-pub(crate) use host_side::PluginLibrary;
+pub(crate) use host_side::remember_described;
 pub use plugin_side::seam_entry;
-
-use crate::core::FailureKind;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// The kinds of failure a plugin's side tells the host's sink of across the seam.
-fn failure_kind_code(kind: FailureKind) -> u32 {
-    match kind {
-        FailureKind::Log => 2,
-        FailureKind::PluginDeactivate => 3,
-        _ => 1,
-    }
-}
-
-fn failure_kind_of(code: u32) -> FailureKind {
-    match code {
-        2 => FailureKind::Log,
-        3 => FailureKind::PluginDeactivate,
-        _ => FailureKind::PluginCallback,
-    }
 }
 
 /// Exports a plugin's entry from its library for a host to load with [`crate::host::Host::load_entry`]: under
