@@ -88,6 +88,16 @@ impl Context {
         })
     }
 
+    /// The enums the contract a loaded library publishes for the capability `id` lists, by name, as
+    /// [`Context::enums_of`] answers a described definition's; none when no live library publishes one, or a host
+    /// across the plugin seam carries no contracts' enums.
+    pub fn capability_enums(&self, id: &str) -> Option<super::DescribedEnums> {
+        match &self.inner.link {
+            Link::Local(state) => state.contract_enums(id),
+            Link::Seam(seam) => seam.capability_enums(id),
+        }
+    }
+
     /// The verified implementations of the capability `id`, each the provider's own object, in the core's order. An
     /// implementation the crate holds no object for is left out and the error sink told.
     pub fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer> {

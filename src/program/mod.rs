@@ -24,7 +24,7 @@ mod signals;
 #[forbid(unsafe_code)]
 mod stop;
 
-pub use command_line::main;
+pub use command_line::{main, process_exit_code};
 pub use options::{DECLARATION_FILE_NAME, FAILED_RUN_EXIT, RunHostOptions};
 pub use run::{RunningHost, run_host, start_host};
 pub use stop::StopRequest;

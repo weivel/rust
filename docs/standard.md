@@ -35,7 +35,7 @@ first shape that the provider does not offer is the caller's mistake, calling no
 
 | type | definition | what it offers |
 |---|---|---|
-| `Config` | `weivel_standard_config` | `get` and `set` of a `Setting` (text, number, boolean), `get_tree` of a whole setting as a value tree |
+| `Config` | `weivel_standard_config` | `all` settings, `get` and `set` of a `Setting` (text, number, boolean), `get_tree` of a whole setting as a value tree, and `settings_file`, the file `set` writes |
 | `Secrets` | `weivel_standard_secrets` | `get`, `set` and `remove` of bytes |
 | `Paths` | `weivel_standard_paths` | `cache`, `config` and `plugin`, each an absolute directory |
 | `Log` | `weivel_standard_log` | `write` of an entry at a `LogLevel`, with fields as a record |

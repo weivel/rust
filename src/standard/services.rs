@@ -171,6 +171,41 @@ impl Config {
             .map(|_| ())
     }
 
+    /// Every setting, the provider's defaults merged with what the host stores, each key once, in the provider's
+    /// order.
+    pub fn all(&self) -> Result<Vec<(String, Setting)>, DescribedCallError> {
+        let answer = self.bound.call("all", &Inputs::new())?;
+        let settings = answered(answer)
+            .and_then(|answers| struct_answer(&answers, "settings"))
+            .unwrap_or_default();
+        let listed = match member(&settings, "settings") {
+            Some(Value::Array(listed)) => listed.clone(),
+            _ => Vec::new(),
+        };
+        Ok(listed
+            .iter()
+            .filter_map(|setting| {
+                let Value::Struct(setting) = setting else {
+                    return None;
+                };
+                let key = text_member(setting, "key")?;
+                match member(setting, "value") {
+                    Some(Value::Struct(value)) => setting_of(value).map(|value| (key, value)),
+                    _ => None,
+                }
+            })
+            .collect())
+    }
+
+    /// The file `set` writes, the one a user edits by hand, as an absolute path; `None` when the provider keeps the
+    /// settings in no file.
+    pub fn settings_file(&self) -> Result<Option<String>, DescribedCallError> {
+        let answer = self.bound.call("settings_file", &Inputs::new())?;
+        Ok(answered(answer)
+            .and_then(|answers| struct_answer(&answers, "file"))
+            .and_then(|file| text_member(&file, "path")))
+    }
+
     /// One setting whole, as a value tree, `None` when the key is neither stored nor defaulted.
     pub fn get_tree(&self, key: &str) -> Result<Option<Tree>, DescribedCallError> {
         let answer = self.bound.call("get_tree", &inputs([("key", text(key))]))?;

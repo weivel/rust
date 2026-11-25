@@ -153,16 +153,42 @@ fn a_provide_short_of_a_published_contract_is_refused_until_the_contract_is_unlo
         ),
         Err(Answer::Mistake(_))
     ));
+    let reading = host
+        .load_entry(
+            &shared_library("weivel_test_plugins"),
+            Some("contract_enums_entry"),
+        )
+        .expect("the reading plugin loads");
+    let reader = host
+        .register(
+            Manifest {
+                import_name: "reader".to_owned(),
+                ..Manifest::default()
+            },
+            reading.clone(),
+        )
+        .expect("the reading plugin registers");
     let activation = host
-        .activate(&[plugin], EdgeSource::CAPABILITIES)
+        .activate(&[plugin, reader], EdgeSource::CAPABILITIES)
         .expect("the plan is drawn");
     let context = host.context(plugin).expect("the plugin has its context");
+    let dark = context
+        .capability_enums("described.mirroring")
+        .and_then(|enums| enums.number("described_shade", "DESCRIBED_SHADE_DARK"))
+        .expect("the contract's enums are published");
+    activation.outcomes[1].wait();
+    assert_eq!(
+        reading.actions().call("shade", None),
+        Some(Ok(Some(weivel_rust::host::Tree::Number(f64::from(dark))))),
+        "a plugin across the seam reads the same enums"
+    );
     let refused = context.provide("described.mirroring", Arc::new(Methods::new()));
     assert!(
         matches!(&refused, Err(Answer::ContractMismatch { capability, .. }) if capability == "described.mirroring"),
         "{refused:?}"
     );
     assert_eq!(host.unload_library(&library), Ok(true));
+    assert!(context.capability_enums("described.mirroring").is_none());
     assert_eq!(
         context.provide("described.mirroring", Arc::new(Methods::new())),
         Ok(())

@@ -274,10 +274,11 @@ impl Entry for LateDeactivating {
 
     fn deactivate(&self) -> Option<Pending<Finished>> {
         let (later, settle) = weivel_rust::context::pending();
-        std::thread::spawn(move || {
+        weivel_rust::host::plugin_thread(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             settle.settle(Ok(()));
-        });
+        })
+        .expect("the thread starts");
         Some(later)
     }
 }
@@ -372,7 +373,12 @@ impl Entry for HostVectorPlugin {
             }
         }
         let (activating, settle) = weivel_rust::context::pending();
-        std::thread::spawn(move || settle.settle(run.activate()));
+        if let Err(error) = weivel_rust::host::plugin_thread(move || settle.settle(run.activate()))
+        {
+            return finished(Err(format!(
+                "the activation's thread did not start: {error}"
+            )));
+        }
         activating
     }
 
@@ -389,6 +395,96 @@ weivel_rust::export_entry!(late_entry, LateDeactivating);
 weivel_rust::export_entry!(stashing_entry, Stashing);
 weivel_rust::export_entry!(stash_calling_entry, StashCalling);
 weivel_rust::export_entry!(cursoring_entry, Cursoring::default());
+/// Registers a service offering one method by name, `ping`, answering `pong`, when its action `register` runs, a
+/// call made outside any activation, so the registration's events are dispatched within that call.
+#[derive(Default)]
+pub struct MethodsProviding {
+    context: Arc<Mutex<Option<Context>>>,
+    registration: Arc<Mutex<Option<weivel_rust::context::ServiceRegistration>>>,
+}
+
+impl Entry for MethodsProviding {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        *self.context.lock().unwrap() = Some(context.clone());
+        finished(Ok(()))
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        let context = self.context.clone();
+        let registration = self.registration.clone();
+        weivel_rust::host::Methods::new().with("register", move |_| {
+            let context = context.lock().unwrap().clone().ok_or("not activated")?;
+            let methods = weivel_rust::host::Methods::new().with("ping", |_| {
+                Ok(Some(weivel_rust::host::Tree::Text("pong".to_owned())))
+            });
+            let registered = context
+                .register("provider:methods", Arc::new(methods))
+                .map_err(|refused| refused.to_string())?;
+            *registration.lock().unwrap() = Some(registered);
+            Ok(None)
+        })
+    }
+}
+
+/// Gets its config and keeps it, reading `greeting` through it whenever its action `greeting` runs.
+#[derive(Default)]
+pub struct ConfigKeeping {
+    config: Arc<Mutex<Option<Object>>>,
+}
+
+impl Entry for ConfigKeeping {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        match context.get("weivel.config") {
+            Ok(config) => {
+                *self.config.lock().unwrap() = Some(config);
+                finished(Ok(()))
+            }
+            Err(refused) => finished(Err(refused.to_string())),
+        }
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        let kept = self.config.clone();
+        weivel_rust::host::Methods::new().with("greeting", move |_| {
+            let object = kept.lock().unwrap().clone().ok_or("no config is kept")?;
+            let config =
+                weivel_rust::standard::Config::of(&object).ok_or("the config is not bound")?;
+            match config.get("greeting") {
+                Ok(setting) => Ok(Some(weivel_rust::host::Tree::Text(format!("{setting:?}")))),
+                Err(refused) => Err(refused.to_string()),
+            }
+        })
+    }
+}
+
+/// Reads the enums of the contract published for `described.mirroring` through its context, when its action `shade`
+/// runs.
+#[derive(Default)]
+pub struct ContractEnumsReading {
+    context: Arc<Mutex<Option<Context>>>,
+}
+
+impl Entry for ContractEnumsReading {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        *self.context.lock().unwrap() = Some(context.clone());
+        finished(Ok(()))
+    }
+
+    fn actions(&self) -> weivel_rust::host::Methods {
+        let context = self.context.clone();
+        weivel_rust::host::Methods::new().with("shade", move |_| {
+            let context = context.lock().unwrap().clone().ok_or("not activated")?;
+            Ok(context
+                .capability_enums("described.mirroring")
+                .and_then(|enums| enums.number("described_shade", "DESCRIBED_SHADE_DARK"))
+                .map(|number| weivel_rust::host::Tree::Number(f64::from(number))))
+        })
+    }
+}
+
+weivel_rust::export_entry!(contract_enums_entry, ContractEnumsReading::default());
+weivel_rust::export_entry!(config_keeping_entry, ConfigKeeping::default());
+weivel_rust::export_entry!(methods_entry, MethodsProviding::default());
 weivel_rust::export_entry!(host_vector_entry, HostVectorPlugin::default());
 
 mod host_vector;

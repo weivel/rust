@@ -273,6 +273,11 @@ impl BoundDefinition {
         self.inner.binding.description.address
     }
 
+    /// The scope of the answer that carried it, none for a definition no answer carried.
+    pub(crate) fn carried_scope(&self) -> Option<Arc<CarriedScope>> {
+        self.inner.environment.scope.clone()
+    }
+
     /// The binary of the library it lies in, while that binary is open; none for one bound with no library.
     pub(crate) fn library(&self) -> Option<Arc<crate::core::LibraryBinary>> {
         match &self.inner.environment.mapping {
@@ -408,17 +413,22 @@ pub(crate) fn bind_described(
 }
 
 /// The operations a contract's description asks of an implementation, in the order it lists them: every operation
-/// but its releases, a release being one that answers nothing.
-pub(crate) fn contract_operations(described: &DescribedDefinition) -> Result<Vec<String>, String> {
+/// but its releases, a release being one that answers nothing; and the enums it lists.
+pub(crate) fn contract_of(
+    described: &DescribedDefinition,
+) -> Result<(Vec<String>, DescribedEnums), String> {
     // SAFETY: the host's description check passed the description, from a library it holds open across this read.
     let description =
         unsafe { reader::read(described.description_address()) }.map_err(|unreadable| {
             format!("the contract's description cannot be read: {unreadable:?}")
         })?;
-    Ok(description
+    let enums = enums_of(&description)
+        .map_err(|refused| format!("the contract's description cannot be bound: {refused}"))?;
+    let operations = description
         .operations
         .iter()
         .filter(|operation| operation.returns == RETURNS_STATUS)
         .map(|operation| operation.name.clone())
-        .collect())
+        .collect();
+    Ok((operations, enums))
 }

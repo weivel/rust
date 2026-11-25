@@ -58,4 +58,9 @@ A run's stop request is a `StopRequest`, shared by the run and whoever started i
 requested; `RunningHost::stop` and the options' `stop` are the same request. The command line hooks SIGINT and SIGTERM
 on POSIX systems with `signal`, and Ctrl+C and Ctrl+Break, SIGINT and SIGBREAK, on Windows with
 `SetConsoleCtrlHandler`, each declared by hand, a handler only setting a flag, which a thread of the program's reads and
-turns into the stop request; that file is the module's only `unsafe`.
+turns into the stop request; that file is the module's only `unsafe`. The design named `sigaction`; `signal` is used
+instead because `struct sigaction` is laid out differently on Linux and on macOS, so declaring it by hand would mean one
+declaration per system, while `signal` takes only the number and the handler and leaves the handler installed on both.
+
+The command line exits with the run's code modulo 256, `process_exit_code`, since a process's exit status holds one
+byte on every platform, as a TypeScript host program's does.

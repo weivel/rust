@@ -67,14 +67,16 @@ same way but registers none of the ids it names, so only its caller reaches them
 or `LoadedLibrary::services`, as a host program binds `weivel.host` and `weivel.scope` for itself. An id declared
 twice, or registered under the host already by a plugin, another live library or the host itself, refuses the load.
 
-Each contract a declaration publishes is checked by the host's description check and published to the plugins'
-contexts until the library's unload, and a declaration of contracts alone registers nothing. A plugin's provide of a
-capability whose contract is published is refused before the core is asked, as `Answer::ContractMismatch`, code
-`contract-mismatch`, naming the first operation the contract's description lists that the implementation does not
-offer, a release, an operation answering nothing, never being one to offer. The operations an implementation offers
-are a `Methods`'s names or a `BoundDefinition`'s operations; one offering more is accepted, and a provide of a
-capability no live library publishes a contract for is never checked. A contract published for a capability another
-live library publishes one for refuses the load.
+Each contract a declaration publishes is checked by the host's description check and published to the plugins' contexts
+until the library's unload, and a declaration of contracts alone registers nothing. A plugin's provide of a capability
+whose contract is published is refused before the core is asked, as `Answer::ContractMismatch`, code
+`contract-mismatch`, naming the first operation the contract's description lists that the implementation does not offer,
+a release, an operation answering nothing, never being one to offer. The operations an implementation offers are a
+`Methods`'s names or a `BoundDefinition`'s operations; one offering more is accepted, and a provide of a capability no
+live library publishes a contract for is never checked. The enums a contract's description lists are published with it,
+and `Context::capability_enums` answers them by name, as `Context::enums_of` answers a described definition's, to a
+plugin in process or across the seam alike. A contract published for a capability another live library publishes one for
+refuses the load.
 
 `Host::unload_library` releases every handle its bound definitions answered and every answer carrying a definition
 that nobody released, while the binary is still mapped, closes the library to calls at once, so a later call through its bytes service answers
@@ -88,24 +90,27 @@ same binary keep it open for each other.
 ## The plugin seam
 
 Rust has no stable ABI, so a plugin built as a library of its own, a `cdylib` with its own copy of this crate, is
-reached through size-prefixed C tables of `extern "C"` functions, never through Rust types. The plugin exports its
-entry with `weivel_rust::export_entry!`, under `weivel_rust_entry` or a symbol of its choosing, and
-`Host::load_entry(path, symbol)` answers an `Entry` the host registers as any other. Each activate is handed the host's
-context table of its plugin and its whole manifest, which the plugin's side wraps in the same safe `Context`: every call
-of a context crosses, gets, wants and their withdrawal, watches of services and of capabilities, the listing of ids
-and of implementations, registrations awaiting releases or not and with a capacity answerer or not, unregistrations,
-releases of a holding and capabilities provided, the log and the error sink with every kind of failure, and every
-event about the plugin. A service object crosses as its provider's address, so identity is the address: a consumer in
-the host's binary receives a `ForeignObject` or a `BoundDefinition`, a plugin across the seam receives the address of
-the host's own object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct
-both sides compile. A described definition crosses with the description its library answered, so the plugin's side
-binds it into a `BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose
-operations it calls as an in-process plugin does. It crosses with the host's id of its library too, and that copy holds
-the library mapped through the host's context table for each call and release, as the host's own binding holds its
-library, so once the binary has closed a call through it answers unloaded rather than reaching unmapped code. Before an
-unload closes a library to calls, the host tells every plugin across the seam, which releases what its own bindings of
-that library got while it is still mapped. A definition an answer carried, as a scope's are, crosses with the nested
-description it was bound from and the id of the library its carrier lies in.
+reached through size-prefixed C tables of `extern "C"` functions, never through Rust types. The plugin exports its entry
+with `weivel_rust::export_entry!`, under `weivel_rust_entry` or a symbol of its choosing, and `Host::load_entry(path,
+symbol)` answers an `Entry` the host registers as any other. Each activate is handed the host's context table of its
+plugin and its whole manifest, which the plugin's side wraps in the same safe `Context`: every call of a context
+crosses, gets, wants and their withdrawal, watches of services and of capabilities, the listing of ids and of
+implementations, registrations awaiting releases or not and with a capacity answerer or not, unregistrations, releases
+of a holding and capabilities provided, the log and the error sink with every kind of failure, and every event about the
+plugin. A service object crosses as its provider's address, so identity is the address: a consumer in the host's binary
+receives a `ForeignObject` or a `BoundDefinition`, a plugin across the seam receives the address of the host's own
+object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct both sides
+compile. A described definition crosses with the description its library answered, so the plugin's side binds it into a
+`BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose operations it
+calls as an in-process plugin does. It crosses with the host's id of its library too, and that copy holds the library
+mapped through the host's context table for each call and release, as the host's own binding holds its library, so once
+the binary has closed a call through it answers unloaded rather than reaching unmapped code. Before an unload closes a
+library to calls, the host tells every plugin across the seam, which releases what its own bindings of that library got
+while it is still mapped. A definition an answer carried, as a scope's are, crosses with the nested description it was
+bound from and a mapping of its own, which a hold also enters the answer's scope through, so once the answer has ended,
+as when the scope is released, a call through the plugin's binding is refused as the caller's mistake, never reaching
+the provider's freed memory, exactly as a call through the host's own binding is. A hold is let go of by its mapping id
+alone, so one made while the plugin's context lived is let go of after the host let go of that context too.
 
 A plugin's object that is a `Methods` crosses with its names, told to the host through `offer_methods` before it is
 registered or provided, so the host's `ForeignObject` for it offers each, a call back across the seam to the plugin's
@@ -114,17 +119,20 @@ names and calling one. A method's arguments and its answer cross as a value tree
 never JSON, and a contract's refusal crosses whole, its capability and operation kept.
 
 Each table is led by its `size`. A side refuses a table below its first shape, the fields it was first published with,
-reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either
-side may append fields without breaking the other. Neither side keeps a pointer into the other's memory past a call:
-each table it receives is copied, every text and list is lent for one call, of any length, and a call's answer is
-handed to the caller's own receiver before the call returns. A context and a completion cross as the host's id of
-them, found in the host's registry, so a call or a finish after the host let go of either answers destroyed or does
-nothing. When the host forgets a plugin it lets go of what it kept of it and tells the plugin's side to close and
-detach that context. When the host drops an entry, the seam's own thread tells the plugin's side to free its table and
-closes the library once no other entry of it is loaded, after every call any plugin made into the host has returned, so
-neither ever runs inside a call that returns into the library's code. A plugin's own threads must have left its code
-by the time it finishes its last activate or deactivate, since its library may close after that. Everything the host
-keeps of the seam is the host's own and goes with it, whether or not it was destroyed first.
+reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either side
+may append fields without breaking the other. Neither side keeps a pointer into the other's memory past a call: each
+table it receives is copied, every text and list is lent for one call, of any length, and a call's answer is handed to
+the caller's own receiver before the call returns. A context and a completion cross as the host's id of them, found in
+the host's registry, so a call or a finish after the host let go of either answers destroyed or does nothing. When the
+host forgets a plugin it lets go of what it kept of it and tells the plugin's side to close and detach that context.
+When the host drops an entry, the seam's own thread tells the plugin's side to free its table and closes the library
+once no other entry of it is loaded, after every call any plugin made into the host has returned, so neither ever runs
+inside a call that returns into the library's code. A plugin's `free` returns only after every thread it started has
+ended, and the host frees it on its retiring thread only after no plugin call into the host runs, so its library never
+closes under its own code; the library is never pinned, so a plugin stays replaceable while the host runs. The plugin's
+side keeps the rule for threads started through `plugin_thread` while the seam calls into the entry, or from such a
+thread: the entry's `free` joins each, as a thread that finishes a deactivate and runs on after the finish needs.
+Everything the host keeps of the seam is the host's own and goes with it, whether or not it was destroyed first.
 
 Every function on both sides catches a panic: a panic in a plugin's activate or deactivate is told to the host's error
 sink and finishes it as failed, so the host quarantines that plugin and goes on. A want made across the seam knows

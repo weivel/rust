@@ -213,6 +213,12 @@ impl OperationPlan {
             .slots(&mut writer, &blocks, inputs)
             .map_err(|detail| self.mistake(detail))?;
         let Some(mapped) = target.mapping.hold() else {
+            if target.mapping.carrier_ended() {
+                return Err(self.mistake(
+                    "the definition was carried by an answer that has ended, and lives only as long as that answer"
+                        .to_owned(),
+                ));
+            }
             return Err(DescribedCallError {
                 operation: self.name.clone(),
                 status: CallStatus::Unloaded,

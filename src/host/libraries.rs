@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::declaration::{LibraryDeclaration, LibraryServiceDeclaration, mistake_in};
-use super::description::{BoundDefinition, Holdings, Mapping, bind_described, contract_operations};
+use super::description::{BoundDefinition, Holdings, Mapping, bind_described, contract_of};
 use super::state::{Host, HostShared, change_count};
 use crate::context::{ForeignObject, Object, ServiceRegistration};
 use crate::core::{Answer, BytesFunction, FailureKind, LibraryBinary, LibraryBytes};
@@ -336,10 +336,10 @@ impl Host {
             };
             let described = binary.described(&contract.description, 0)?;
             check.check_contract(&described)?;
-            let operations = contract_operations(&described).map_err(Answer::Mistake)?;
+            let (operations, enums) = contract_of(&described).map_err(Answer::Mistake)?;
             self.shared
                 .contexts
-                .publish_contract(&contract.capability, operations)?;
+                .publish_contract(&contract.capability, operations, enums)?;
             locked(&library.inner.contracts).push(contract.capability.clone());
         }
         Ok(())

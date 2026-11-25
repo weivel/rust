@@ -23,9 +23,9 @@ mod value;
 mod write;
 
 pub use definition::BoundDefinition;
-pub(crate) use definition::{bind_described, contract_operations};
+pub(crate) use definition::{bind_described, contract_of};
 pub use holdings::DescribedHandle;
-pub(crate) use holdings::{Holdings, Mapping, RemoteMapping};
+pub(crate) use holdings::{CarriedScope, Holdings, Mapping, RemoteMapping, ScopeCall};
 pub(crate) use layouts::Layouts;
 pub use value::{
     Answers, CallStatus, DescribedAnswer, DescribedCallError, Inputs, Members, Tree, Value,

@@ -13,12 +13,14 @@ use super::abi::{
     EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_DESCRIPTION_END, EVENT_FIRST_SHAPE,
     EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING, EVENT_MAPPING_END, EVENT_REACH_REFUSED,
     EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED,
-    SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent,
-    SeamManifest, SeamNumber, SeamText, SeamTexts, SeamWantLimits, carries, copy_table,
-    failure_kind_code, lend_answered, lend_numbers, lend_texts, read_answered, read_manifest,
-    read_numbers, read_refusal, size_of_table,
+    HOLD_CARRIER_ENDED, HOLD_CLOSED, HOLD_HELD, SeamAnswer, SeamAnswered, SeamCapacity,
+    SeamCompletion, SeamContext, SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamText,
+    SeamTexts, SeamWantLimits, carries, copy_table, failure_kind_code, lend_answered, lend_numbers,
+    lend_texts, read_answered, read_manifest, read_numbers, read_refusal, size_of_table,
 };
+use super::abi::{CONTEXT_CAPABILITY_ENUMS_END, enums_of_texts};
 use super::locked;
+use super::threads::PluginThreads;
 use super::trees::{answering_of, decode};
 use crate::context::{
     CapabilityWatcher, CapacityAnswerer, Context, ForeignObject, Object, PluginEvent, Revocation,
@@ -39,7 +41,8 @@ enum Watcher {
 #[derive(Default)]
 struct Kept {
     last_token: u64,
-    objects: Vec<(Option<Handle>, Option<u64>, Object)>,
+    /// Each object with its registration once the host answered it, its answerer, and the token it was kept by.
+    objects: Vec<(Option<Handle>, Option<u64>, Object, u64)>,
     wants: HashMap<u64, Arc<WantRecord>>,
     watchers: HashMap<u64, Watcher>,
     answerers: HashMap<u64, Arc<dyn CapacityAnswerer>>,
@@ -141,6 +144,24 @@ impl HostTable {
         .map(|_| ())
     }
 
+    /// Keeps this side's own object before it crosses, so a call back to it during the very call that hands it across,
+    /// as a consumer's during that call's dispatch, finds it; answers the token it is kept by.
+    fn keep(&self, registration: Option<Handle>, answerer: Option<u64>, object: Object) -> u64 {
+        let mut kept = locked(&self.kept);
+        let token = kept.token();
+        kept.objects.push((registration, answerer, object, token));
+        token
+    }
+
+    /// Lets go of an object kept for a call the host refused, and of its answerer.
+    fn let_go(&self, kept_by: u64, answerer: Option<u64>) {
+        let mut kept = locked(&self.kept);
+        kept.objects.retain(|entry| entry.3 != kept_by);
+        if let Some(answerer) = answerer {
+            kept.answerers.remove(&answerer);
+        }
+    }
+
     /// Calls the method `name` of this side's own object at `address`, one it registered or provided.
     fn call_method(
         &self,
@@ -151,8 +172,8 @@ impl HostTable {
         let object = locked(&self.kept)
             .objects
             .iter()
-            .find(|(_, _, object)| address_of(object) == address)
-            .map(|(_, _, object)| object.clone())?;
+            .find(|(_, _, object, _)| address_of(object) == address)
+            .map(|(_, _, object, _)| object.clone())?;
         methods_of(&object)?.call(name, arguments)
     }
 
@@ -162,10 +183,10 @@ impl HostTable {
     /// the bare address.
     fn object_at(&self, crossed: Crossed) -> Object {
         let mut kept = locked(&self.kept);
-        if let Some((_, _, object)) = kept
+        if let Some((_, _, object, _)) = kept
             .objects
             .iter()
-            .find(|(_, _, object)| address_of(object) == crossed.address)
+            .find(|(_, _, object, _)| address_of(object) == crossed.address)
         {
             return object.clone();
         }
@@ -183,6 +204,7 @@ impl HostTable {
             table: self.table,
             closed: self.closed.clone(),
             mapping: crossed.mapping,
+            carrier_ended: AtomicBool::new(false),
         });
         let Some(mapped) = Mapping::Remote(mapping.clone()).hold() else {
             return bare();
@@ -267,16 +289,26 @@ struct HostMapping {
     table: SeamContext,
     closed: Arc<AtomicBool>,
     mapping: u64,
+    carrier_ended: AtomicBool,
 }
 
 impl RemoteMapping for HostMapping {
     fn hold(&self) -> bool {
         // SAFETY: the call takes nothing but ids; the host answers 0 for a table or library it let go of.
-        !self.closed.load(Ordering::Acquire)
-            && self
-                .table
-                .hold
-                .is_some_and(|hold| unsafe { hold(self.table.data, self.mapping) } != 0)
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let answered = self.table.hold.map_or(HOLD_CLOSED, |hold| unsafe {
+            hold(self.table.data, self.mapping)
+        });
+        if answered == HOLD_CARRIER_ENDED {
+            self.carrier_ended.store(true, Ordering::Release);
+        }
+        answered == HOLD_HELD
+    }
+
+    fn carrier_ended(&self) -> bool {
+        self.carrier_ended.load(Ordering::Acquire)
     }
 
     fn unhold(&self) {
@@ -381,10 +413,9 @@ impl SeamCalls for HostTable {
             token
         });
         let address = address_of(&service);
+        let kept_by = self.keep(None, answerer_id, service.clone());
         if let Err(refused) = self.offer_methods_of(&service) {
-            if let Some(answerer_id) = answerer_id {
-                locked(&self.kept).answerers.remove(&answerer_id);
-            }
+            self.let_go(kept_by, answerer_id);
             return Err(refused);
         }
         // SAFETY: as above.
@@ -398,18 +429,17 @@ impl SeamCalls for HostTable {
                 answer,
             )
         });
-        let mut kept = locked(&self.kept);
         match registered {
             Ok(registered) => {
                 let registration = Handle(registered.number);
-                kept.objects
-                    .push((Some(registration), answerer_id, service));
+                let mut kept = locked(&self.kept);
+                if let Some(entry) = kept.objects.iter_mut().find(|entry| entry.3 == kept_by) {
+                    entry.0 = Some(registration);
+                }
                 Ok(registration)
             }
             Err(refused) => {
-                if let Some(answerer_id) = answerer_id {
-                    kept.answerers.remove(&answerer_id);
-                }
+                self.let_go(kept_by, answerer_id);
                 Err(refused)
             }
         }
@@ -424,14 +454,14 @@ impl SeamCalls for HostTable {
         let answerers: Vec<u64> = kept
             .objects
             .iter()
-            .filter(|(kept_registration, _, _)| *kept_registration == Some(registration))
-            .filter_map(|(_, answerer, _)| *answerer)
+            .filter(|(kept_registration, _, _, _)| *kept_registration == Some(registration))
+            .filter_map(|(_, answerer, _, _)| *answerer)
             .collect();
         for answerer in answerers {
             kept.answerers.remove(&answerer);
         }
         kept.objects
-            .retain(|(kept_registration, _, _)| *kept_registration != Some(registration));
+            .retain(|(kept_registration, _, _, _)| *kept_registration != Some(registration));
         Ok(())
     }
 
@@ -448,15 +478,17 @@ impl SeamCalls for HostTable {
 
     fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer> {
         let address = address_of(&implementation);
-        self.offer_methods_of(&implementation)?;
+        let kept_by = self.keep(None, None, implementation.clone());
         // SAFETY: as above.
-        self.call(|table, answer| unsafe {
-            (table.provide)(table.data, SeamText::of(id), address, answer)
-        })?;
-        locked(&self.kept)
-            .objects
-            .push((None, None, implementation));
-        Ok(())
+        let provided = self.offer_methods_of(&implementation).and_then(|()| {
+            self.call(|table, answer| unsafe {
+                (table.provide)(table.data, SeamText::of(id), address, answer)
+            })
+        });
+        if provided.is_err() {
+            self.let_go(kept_by, None);
+        }
+        provided.map(|_| ())
     }
 
     fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer> {
@@ -478,6 +510,18 @@ impl SeamCalls for HostTable {
                 })
             })
             .collect())
+    }
+
+    fn capability_enums(&self, id: &str) -> Option<crate::context::DescribedEnums> {
+        let capability_enums = self
+            .table
+            .capability_enums
+            .filter(|_| carries(self.table.size, CONTEXT_CAPABILITY_ENUMS_END))?;
+        // SAFETY: every argument lives for the call.
+        let answered = self
+            .call(|table, answer| unsafe { capability_enums(table.data, SeamText::of(id), answer) })
+            .ok()?;
+        enums_of_texts(answered.texts)
     }
 
     fn write(&self, level: LogLevel, text: &str) {
@@ -544,6 +588,7 @@ struct PluginSide {
     table: SeamEntry,
     entry: Arc<dyn Entry>,
     contexts: Mutex<HashMap<u64, (Arc<HostTable>, Context)>>,
+    threads: Arc<PluginThreads>,
 }
 
 impl PluginSide {
@@ -609,6 +654,7 @@ pub fn seam_entry<E: Entry + 'static>(make: impl FnOnce() -> Arc<E>) -> *const S
         },
         entry,
         contexts: Mutex::new(HashMap::new()),
+        threads: Arc::default(),
     }));
     // SAFETY: the side was just made and is the plugin's own until its `free`.
     unsafe {
@@ -664,7 +710,9 @@ unsafe extern "C" fn plugin_activate(
             Ok(context) => context,
             Err(refused) => return finisher.finish(&Err(refused)),
         };
-        match catch_unwind(AssertUnwindSafe(|| side.entry.activate(&context))) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            side.threads.within(|| side.entry.activate(&context))
+        })) {
             Ok(activating) => activating.on_settled(move |finished| finisher.finish(finished)),
             Err(payload) => finisher.finish(&Err(panicked(Some(&context), "activate", &*payload))),
         }
@@ -685,7 +733,9 @@ unsafe extern "C" fn plugin_deactivate(
     };
     let offered = catch_unwind(AssertUnwindSafe(|| {
         let side = side_of(data);
-        match catch_unwind(AssertUnwindSafe(|| side.entry.deactivate())) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            side.threads.within(|| side.entry.deactivate())
+        })) {
             Ok(None) => false,
             Ok(Some(deactivating)) => {
                 deactivating.on_settled(move |finished| finisher.finish(finished));
@@ -802,11 +852,13 @@ unsafe extern "C" fn plugin_hear(data: *const c_void, event: *const SeamEvent) {
         if !carries(event.size, EVENT_FIRST_SHAPE) {
             return;
         }
-        let Some((host, context)) = side_of(data).context_of(event.context) else {
+        let side = side_of(data);
+        let Some((host, context)) = side.context_of(event.context) else {
             return;
         };
         // SAFETY: as above.
-        unsafe { heard(&host, &context, event) };
+        side.threads
+            .within(|| unsafe { heard(&host, &context, event) });
     }));
 }
 
@@ -824,7 +876,8 @@ unsafe extern "C" fn plugin_capacity(
         if answer.is_null() || !carries(unsafe { (*answer).size }, CAPACITY_FIRST_SHAPE) {
             return;
         }
-        let Some((host, plugin_context)) = side_of(data).context_of(context) else {
+        let side = side_of(data);
+        let Some((host, plugin_context)) = side.context_of(context) else {
             return;
         };
         let Some(answering) = locked(&host.kept).answerers.get(&answerer).cloned() else {
@@ -833,16 +886,19 @@ unsafe extern "C" fn plugin_capacity(
         // SAFETY: the constraints are lent for the call.
         let constraints = unsafe { read_numbers(constraints, count) };
         let mut answered = None;
-        plugin_context.inner.link.call_back(
-            || {
-                answered = Some(match question {
-                    1 => (false, answering.attributes()),
-                    _ => (answering.serves(&constraints), Vec::new()),
-                })
-            },
-            FailureKind::PluginCallback,
-            "a capacity answerer panicked, so its question went unanswered",
-        );
+        let threads = side.threads.clone();
+        threads.within(|| {
+            plugin_context.inner.link.call_back(
+                || {
+                    answered = Some(match question {
+                        1 => (false, answering.attributes()),
+                        _ => (answering.serves(&constraints), Vec::new()),
+                    })
+                },
+                FailureKind::PluginCallback,
+                "a capacity answerer panicked, so its question went unanswered",
+            )
+        });
         let Some((serves, attributes)) = answered else {
             return;
         };
@@ -872,8 +928,9 @@ fn answer_the_host(answer: *const SeamAnswer, call: impl FnOnce() -> Result<Answ
 
 unsafe extern "C" fn plugin_action_names(data: *const c_void, answer: *const SeamAnswer) {
     answer_the_host(answer, || {
+        let side = side_of(data);
         Ok(Answering {
-            texts: side_of(data).entry.actions().names(),
+            texts: side.threads.within(|| side.entry.actions().names()),
             ..Answering::default()
         })
     });
@@ -901,12 +958,14 @@ unsafe extern "C" fn plugin_call(
             ),
         };
         let side = side_of(data);
-        let result = if address == 0 {
-            side.entry.actions().call(&name, arguments.as_ref())
-        } else {
-            side.context_of(context)
-                .and_then(|(host, _)| host.call_method(address, &name, arguments.as_ref()))
-        };
+        let result = side.threads.within(|| {
+            if address == 0 {
+                side.entry.actions().call(&name, arguments.as_ref())
+            } else {
+                side.context_of(context)
+                    .and_then(|(host, _)| host.call_method(address, &name, arguments.as_ref()))
+            }
+        });
         answering_of(result)
     });
 }
@@ -929,6 +988,7 @@ unsafe extern "C" fn plugin_free(data: *const c_void) {
             context.detach();
             host.close();
         }
+        side.threads.join_all();
         drop(side);
     }));
 }

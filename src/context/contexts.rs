@@ -2,11 +2,12 @@
 
 use std::sync::{Arc, Weak};
 
+use super::enums::DescribedEnums;
 use super::log::HostLog;
 use super::plugin::Context;
 use super::records::{Object, Record, Releases, Table};
 use super::services::{Registering, ServiceRegistration};
-use super::state::ContextState;
+use super::state::{ContextState, Contract};
 use crate::core::{
     Answer, Core, Event, FailureKind, Handle, ListenerRegistration, Manifest, QuarantineReason,
     Refusal, RefusalStatus,
@@ -120,12 +121,14 @@ impl Contexts {
     }
 
     /// Publishes the contract of `capability`: from now on a plugin's provide of it is refused as
-    /// [`Answer::ContractMismatch`] when its implementation does not offer every one of `operations`. Answers
-    /// [`Answer::Mistake`] for a capability whose contract is published already.
+    /// [`Answer::ContractMismatch`] when its implementation does not offer every one of `operations`, and its
+    /// [`Context::capability_enums`] are `enums`. Answers [`Answer::Mistake`] for a capability whose contract is
+    /// published already.
     pub fn publish_contract(
         &self,
         capability: &str,
         operations: Vec<String>,
+        enums: DescribedEnums,
     ) -> Result<(), Answer> {
         let mut contracts = self
             .state
@@ -137,7 +140,7 @@ impl Contexts {
                 "a contract for the capability {capability} is published already"
             )));
         }
-        contracts.insert(capability.to_owned(), operations);
+        contracts.insert(capability.to_owned(), Contract { operations, enums });
         Ok(())
     }
 

@@ -43,6 +43,7 @@ pub(crate) trait SeamCalls: Send + Sync {
     fn release_holding(&self, revocation: &Revocation) -> Result<bool, Answer>;
     fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer>;
     fn implementations(&self, id: &str) -> Result<Vec<Object>, Answer>;
+    fn capability_enums(&self, id: &str) -> Option<super::DescribedEnums>;
     fn write(&self, level: LogLevel, text: &str);
     fn report(&self, kind: FailureKind, text: &str);
     /// Whether this thread dispatches the host's core now, so a result only its dispatch settles would never settle.

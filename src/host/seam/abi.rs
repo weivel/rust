@@ -157,14 +157,18 @@ pub struct SeamContext {
     pub(super) provide: unsafe extern "C" fn(u64, SeamText, usize, *const SeamAnswer),
     pub(super) implementations: unsafe extern "C" fn(u64, SeamText, *const SeamAnswer),
     pub(super) dispatches_here: unsafe extern "C" fn(u64) -> u32,
-    /// Appended: holds the library a mapping id names mapped, answering 1, or 0 once it has closed; `unhold` lets go of
-    /// one hold.
+    /// Appended: holds the library a mapping id names mapped, answering [`HOLD_HELD`], [`HOLD_CLOSED`] once it has
+    /// closed, or [`HOLD_CARRIER_ENDED`] once the answer that carried its definition has ended; `unhold` lets go of one
+    /// hold.
     pub(super) hold: Option<unsafe extern "C" fn(u64, u64) -> u32>,
     pub(super) unhold: Option<unsafe extern "C" fn(u64, u64)>,
     /// Appended: tells the host that the plugin's object at the address offers the methods named, before it is
     /// registered or provided, so the host's object for it calls them back across the seam by name.
     pub(super) offer_methods:
         Option<unsafe extern "C" fn(u64, usize, SeamTexts, *const SeamAnswer)>,
+    /// Appended: answers the enums of the contract a loaded library publishes for a capability as texts, each enum its
+    /// name, its entry count, then each entry's name and number; absent for no contract.
+    pub(super) capability_enums: Option<unsafe extern "C" fn(u64, SeamText, *const SeamAnswer)>,
 }
 
 /// What the host hands an activate or a deactivate to finish it with: `data` the host's id for it, so a finish after
@@ -281,6 +285,38 @@ macro_rules! first_shape {
 pub(super) const ENTRY_FIRST_SHAPE: usize = first_shape!(SeamEntry, free);
 pub(super) const ENTRY_CALL_END: usize = first_shape!(SeamEntry, call);
 pub(super) const CONTEXT_OFFER_METHODS_END: usize = first_shape!(SeamContext, offer_methods);
+pub(super) const CONTEXT_CAPABILITY_ENUMS_END: usize = first_shape!(SeamContext, capability_enums);
+
+/// Enums as the seam's texts carry them: each enum's name, its entry count, then each entry's name and number.
+pub(super) fn enum_texts(enums: &crate::context::DescribedEnums) -> Vec<String> {
+    let mut texts = Vec::new();
+    for name in enums.names() {
+        let entries = enums.entries(name).cloned().unwrap_or_default();
+        texts.push(name.to_owned());
+        texts.push(entries.len().to_string());
+        for (entry, number) in entries {
+            texts.push(entry);
+            texts.push(number.to_string());
+        }
+    }
+    texts
+}
+
+/// Enums read back from the seam's texts, none for texts not in that form.
+pub(super) fn enums_of_texts(texts: Vec<String>) -> Option<crate::context::DescribedEnums> {
+    let mut words = texts.into_iter();
+    let mut enums = std::collections::BTreeMap::new();
+    while let Some(name) = words.next() {
+        let count: usize = words.next()?.parse().ok()?;
+        let mut entries = std::collections::BTreeMap::new();
+        for _ in 0..count {
+            let entry = words.next()?;
+            entries.insert(entry, words.next()?.parse().ok()?);
+        }
+        enums.insert(name, entries);
+    }
+    Some(crate::context::DescribedEnums::new(enums))
+}
 pub(super) const CONTEXT_FIRST_SHAPE: usize = first_shape!(SeamContext, dispatches_here);
 pub(super) const COMPLETION_FIRST_SHAPE: usize = first_shape!(SeamCompletion, finish);
 pub(super) const EVENT_FIRST_SHAPE: usize = first_shape!(SeamEvent, settlement);
@@ -293,26 +329,33 @@ pub(super) const MANIFEST_FIRST_SHAPE: usize = first_shape!(SeamManifest, servic
 pub(super) const WANT_LIMITS_FIRST_SHAPE: usize = first_shape!(SeamWantLimits, poll_millis);
 pub(super) const CAPACITY_FIRST_SHAPE: usize = first_shape!(SeamCapacity, take);
 
-/// Copies a table the other side lent, reading no byte past the `size` it leads with: every field it does not reach is
-/// zero, which is `None` for an appended function, since every field past a table's first shape is nullable.
+/// Copies a table the other side lent, reading no byte past the `size` it leads with and no part of a field it ends
+/// inside: every field it does not reach whole is zero, which is `None` for an appended function, since every field
+/// past a table's first shape is nullable.
 ///
 /// # Safety
-/// `table` points at a table of `T` whose `size` reaches at least its first shape, and every field of `T` past that
-/// first shape is valid as zero.
+/// `table` points at a table of `T` whose `size` reaches at least its first shape, every field of `T` after its
+/// leading `size` is one word, and every field past that first shape is valid as zero.
 pub(super) unsafe fn copy_table<T>(table: *const T) -> T {
     // SAFETY: as the caller promised, the table begins with its `size`.
     let size = unsafe { table.cast::<u32>().read_unaligned() } as usize;
+    let whole = whole_fields(size.min(size_of::<T>()), align_of::<T>());
     let mut copied = std::mem::MaybeUninit::<T>::zeroed();
-    // SAFETY: the other side's table spans `size` bytes, and only as many as both know are copied.
+    // SAFETY: the other side's table spans `size` bytes, and only as many as both know, in whole fields, are copied.
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            table.cast::<u8>(),
-            copied.as_mut_ptr().cast::<u8>(),
-            size.min(size_of::<T>()),
-        );
+        std::ptr::copy_nonoverlapping(table.cast::<u8>(), copied.as_mut_ptr().cast::<u8>(), whole);
     }
-    // SAFETY: every field up to the first shape was copied, and every field past it is valid as zero.
+    // SAFETY: every field up to the first shape was copied whole, and every field past it is valid as zero.
     unsafe { copied.assume_init() }
+}
+
+/// `bytes` rounded down to the end of the last whole field, every field of a table being `word` bytes but its
+/// leading `size`, which a table of fewer bytes than one word still carries.
+pub(super) fn whole_fields(bytes: usize, word: usize) -> usize {
+    if bytes < word {
+        return bytes.min(size_of::<u32>());
+    }
+    bytes - bytes % word
 }
 
 unsafe extern "C" fn take_into_slot(data: *mut c_void, answered: *const SeamAnswered) {
@@ -470,6 +513,11 @@ const DESTROYED: u32 = 3;
 const DEFECT: u32 = 4;
 const MISTAKE: u32 = 5;
 const DETACHED: u32 = 6;
+
+/// What the context table's `hold` answers.
+pub(super) const HOLD_CLOSED: u32 = 0;
+pub(super) const HOLD_HELD: u32 = 1;
+pub(super) const HOLD_CARRIER_ENDED: u32 = 2;
 const CONTRACT_MISMATCH: u32 = 7;
 
 /// What a callee answers across the seam, owned on its side until it is lent to the caller's [`SeamAnswer`].

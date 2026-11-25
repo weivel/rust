@@ -136,6 +136,17 @@ fn an_entry_table_of_its_first_shape_is_taken_with_no_calls_of_methods() {
 }
 
 #[test]
+fn a_size_ending_inside_an_appended_field_takes_none_of_that_field() {
+    let table = plugin_entry_table();
+    let mut torn = table;
+    torn.size = (ENTRY_FIRST_SHAPE + 3) as u32;
+    let taken = entry_table_of(&torn, "torn").expect("the first shape is taken");
+    assert!(taken.action_names.is_none() && taken.call.is_none());
+    // SAFETY: the table is the one `seam_entry` made, freed once.
+    unsafe { (table.free)(table.data) };
+}
+
+#[test]
 fn a_contract_mismatch_crosses_whole() {
     let mismatch = Answer::ContractMismatch {
         capability: "stub-host.tally".to_owned(),
@@ -226,6 +237,7 @@ fn host_context_table(size: u32) -> SeamContext {
         hold: Some(hold),
         unhold: Some(unhold),
         offer_methods: None,
+        capability_enums: None,
     }
 }
 
@@ -477,4 +489,146 @@ fn an_event_reaches_the_context_it_names_of_an_entry_activated_for_two_plugins()
 fn a_call_handed_no_answer_is_not_made_and_crashes_nothing() {
     // SAFETY: every argument lives for the call; the answer is NULL on purpose.
     unsafe { super::host_side::call_get_without_an_answer() };
+}
+
+#[test]
+fn the_methods_a_plugin_offers_are_kept_no_longer_than_the_registration_they_were_said_for() {
+    let plugins = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build")
+        .join("native")
+        .join(format!("{DLL_PREFIX}weivel_test_plugins{DLL_SUFFIX}"));
+    let host = Host::create(
+        &core_binary(),
+        HostOptions {
+            scheduler: HostScheduler::NoClock,
+            ..HostOptions::default()
+        },
+    )
+    .unwrap();
+    let entry = host
+        .load_entry(&plugins, Some("methods_entry"))
+        .expect("the plugin loads");
+    let manifest = Manifest {
+        import_name: "provider".to_owned(),
+        services_provided: vec![crate::core::ServiceOffer {
+            id: "provider:methods".to_owned(),
+            attributes: Vec::new(),
+        }],
+        ..Manifest::default()
+    };
+    let plugin = host.register(manifest, entry.clone()).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    drop(activation.outcomes[0].wait());
+    assert_eq!(entry.actions().call("register", None), Some(Ok(None)));
+    assert_eq!(host.shared.seam.offered_method_count(), 0);
+    host.destroy().wait();
+}
+
+#[test]
+fn a_hold_made_through_a_context_is_let_go_of_after_the_host_let_go_of_that_context() {
+    use crate::host::{
+        FunctionKind, LibraryDeclaration, LibraryFunction, LibraryServiceDeclaration,
+    };
+    let native = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build")
+        .join("native");
+    let library = |name: &str| native.join(format!("{DLL_PREFIX}{name}{DLL_SUFFIX}"));
+    let check = crate::standard::StandardDescriptions::load(library("weivel_standard"))
+        .expect("the standard's checks load");
+    let host = Host::create(
+        &core_binary(),
+        HostOptions {
+            scheduler: HostScheduler::NoClock,
+            description_check: Some(Arc::new(check)),
+            ..HostOptions::default()
+        },
+    )
+    .unwrap();
+    let declaration = LibraryDeclaration {
+        import_name: "described".to_owned(),
+        version: "1.0.0".to_owned(),
+        release: None,
+        services: vec![LibraryServiceDeclaration {
+            id: "described-mirror".to_owned(),
+            functions: vec![LibraryFunction {
+                name: "definition".to_owned(),
+                symbol: "described_mirror_definition".to_owned(),
+                kind: FunctionKind::Definition,
+                context: 0,
+            }],
+            description: Some("described_mirror_description".to_owned()),
+        }],
+        contracts: Vec::new(),
+    };
+    let _loaded = host
+        .load_library(&library("weivel_standard_described"), &declaration)
+        .expect("the described library loads");
+    let entry = host
+        .load_entry(&library("weivel_test_plugins"), Some("methods_entry"))
+        .expect("the plugin loads");
+    let manifest = Manifest {
+        import_name: "holder".to_owned(),
+        services_consumed: vec![crate::core::ServiceWant {
+            id: "described-mirror".to_owned(),
+            provider: None,
+            optional: Some(true),
+            degradable: None,
+            constraints: Vec::new(),
+        }],
+        ..Manifest::default()
+    };
+    let plugin = host.register(manifest, entry).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    drop(activation.outcomes[0].wait());
+    let registry = host.shared.seam.clone();
+    let context = registry.context_ids()[0];
+    let mapping = super::host_side::get_and_hold(context, "described-mirror");
+    assert_eq!(registry.hold_count(mapping), 1);
+    assert_eq!(host.release(plugin).wait(), Ok(true));
+    assert!(registry.context_ids().is_empty());
+    super::host_side::unhold(context, mapping);
+    assert_eq!(registry.hold_count(mapping), 0);
+    host.destroy().wait();
+}
+
+static LATE_THREAD_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Finishes its deactivate from a thread of its own, which runs on in the plugin's code after the finish.
+struct FinishesLate;
+
+impl Entry for FinishesLate {
+    fn activate(&self, _: &Context) -> Pending<Finished> {
+        Pending::settled(Ok(()))
+    }
+
+    fn deactivate(&self) -> Option<Pending<Finished>> {
+        let (later, settle) = crate::context::pending();
+        crate::host::plugin_thread(move || {
+            settle.settle(Ok(()));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            LATE_THREAD_ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect("the thread starts");
+        Some(later)
+    }
+}
+
+#[test]
+fn an_entrys_free_returns_only_after_the_thread_that_finished_its_deactivate_has_ended() {
+    let table = seam_entry(|| Arc::new(FinishesLate));
+    // SAFETY: `seam_entry` answers a whole table, freed below by its own `free`.
+    let table = unsafe { std::ptr::read(table) };
+    let completion = SeamCompletion {
+        size: size_of::<SeamCompletion>() as u32,
+        data: 0,
+        finish: record_finish,
+    };
+    // SAFETY: the completion lives for the call.
+    assert_eq!(unsafe { (table.deactivate)(table.data, &completion) }, 0);
+    // SAFETY: the table is the one `seam_entry` made, freed once.
+    unsafe { (table.free)(table.data) };
+    assert!(
+        LATE_THREAD_ENDED.load(std::sync::atomic::Ordering::SeqCst),
+        "free returned while the plugin's own thread still ran its code"
+    );
 }
