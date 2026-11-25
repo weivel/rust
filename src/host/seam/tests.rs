@@ -136,6 +136,17 @@ fn an_entry_table_of_its_first_shape_is_taken_with_no_calls_of_methods() {
 }
 
 #[test]
+fn a_size_ending_inside_an_appended_field_takes_none_of_that_field() {
+    let table = plugin_entry_table();
+    let mut torn = table;
+    torn.size = (ENTRY_FIRST_SHAPE + 3) as u32;
+    let taken = entry_table_of(&torn, "torn").expect("the first shape is taken");
+    assert!(taken.action_names.is_none() && taken.call.is_none());
+    // SAFETY: the table is the one `seam_entry` made, freed once.
+    unsafe { (table.free)(table.data) };
+}
+
+#[test]
 fn a_contract_mismatch_crosses_whole() {
     let mismatch = Answer::ContractMismatch {
         capability: "stub-host.tally".to_owned(),

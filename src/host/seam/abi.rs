@@ -293,26 +293,33 @@ pub(super) const MANIFEST_FIRST_SHAPE: usize = first_shape!(SeamManifest, servic
 pub(super) const WANT_LIMITS_FIRST_SHAPE: usize = first_shape!(SeamWantLimits, poll_millis);
 pub(super) const CAPACITY_FIRST_SHAPE: usize = first_shape!(SeamCapacity, take);
 
-/// Copies a table the other side lent, reading no byte past the `size` it leads with: every field it does not reach is
-/// zero, which is `None` for an appended function, since every field past a table's first shape is nullable.
+/// Copies a table the other side lent, reading no byte past the `size` it leads with and no part of a field it ends
+/// inside: every field it does not reach whole is zero, which is `None` for an appended function, since every field
+/// past a table's first shape is nullable.
 ///
 /// # Safety
-/// `table` points at a table of `T` whose `size` reaches at least its first shape, and every field of `T` past that
-/// first shape is valid as zero.
+/// `table` points at a table of `T` whose `size` reaches at least its first shape, every field of `T` after its
+/// leading `size` is one word, and every field past that first shape is valid as zero.
 pub(super) unsafe fn copy_table<T>(table: *const T) -> T {
     // SAFETY: as the caller promised, the table begins with its `size`.
     let size = unsafe { table.cast::<u32>().read_unaligned() } as usize;
+    let whole = whole_fields(size.min(size_of::<T>()), align_of::<T>());
     let mut copied = std::mem::MaybeUninit::<T>::zeroed();
-    // SAFETY: the other side's table spans `size` bytes, and only as many as both know are copied.
+    // SAFETY: the other side's table spans `size` bytes, and only as many as both know, in whole fields, are copied.
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            table.cast::<u8>(),
-            copied.as_mut_ptr().cast::<u8>(),
-            size.min(size_of::<T>()),
-        );
+        std::ptr::copy_nonoverlapping(table.cast::<u8>(), copied.as_mut_ptr().cast::<u8>(), whole);
     }
-    // SAFETY: every field up to the first shape was copied, and every field past it is valid as zero.
+    // SAFETY: every field up to the first shape was copied whole, and every field past it is valid as zero.
     unsafe { copied.assume_init() }
+}
+
+/// `bytes` rounded down to the end of the last whole field, every field of a table being `word` bytes but its
+/// leading `size`, which a table of fewer bytes than one word still carries.
+pub(super) fn whole_fields(bytes: usize, word: usize) -> usize {
+    if bytes < word {
+        return bytes.min(size_of::<u32>());
+    }
+    bytes - bytes % word
 }
 
 unsafe extern "C" fn take_into_slot(data: *mut c_void, answered: *const SeamAnswered) {
