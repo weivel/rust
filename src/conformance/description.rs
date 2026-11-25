@@ -279,7 +279,7 @@ impl DescriptionRun {
         counts
             .iter()
             .map(|(name, count)| match count {
-                Value::U64(count) => Ok((name.clone(), *count)),
+                Value::U64(count) => Ok((name.to_owned(), *count)),
                 other => Err(format!("{COUNT_RELEASES} counted {name} as {other:?}")),
             })
             .collect()
@@ -557,7 +557,7 @@ impl Kept {
             Value::Struct(members) => Json::Object(
                 members
                     .iter()
-                    .map(|(name, member)| Ok((name.clone(), self.json(member)?)))
+                    .map(|(name, member)| Ok((name.to_owned(), self.json(member)?)))
                     .collect::<Result<_, DriverFailure>>()?,
             ),
             Value::Tree(tree) => tree_json(tree),

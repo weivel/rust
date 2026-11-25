@@ -7,7 +7,7 @@ use std::sync::{Arc, MutexGuard};
 use weivel_rust::context::{Object, address_of};
 use weivel_rust::core::{Answer, EdgeSource};
 use weivel_rust::host::{
-    BoundDefinition, CallStatus, DescribedAnswer, Host, Inputs, LoadedLibrary, Value,
+    BoundDefinition, CallStatus, DescribedAnswer, Host, Inputs, LoadedLibrary, Members, Value,
 };
 
 use crate::libraries::{ONE_AT_A_TIME, described_declaration, described_host};
@@ -255,9 +255,12 @@ fn a_carried_definition_outlives_the_answers_value_it_was_read_from() {
 
 /// A node whose `next` reaches `links` nodes below it, each one pointer further down.
 fn chain(links: usize) -> Value {
-    let mut node = Value::Struct(inputs(&[("label", Value::Text(Some("last".to_owned())))]));
+    let mut node = Value::Struct(Members::from([(
+        "label",
+        Value::Text(Some("last".to_owned())),
+    )]));
     for _ in 0..links {
-        node = Value::Struct(inputs(&[
+        node = Value::Struct(Members::from([
             ("label", Value::Text(Some("link".to_owned()))),
             ("next", node),
         ]));

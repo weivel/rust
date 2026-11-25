@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::invoke::ReleaseCall;
-use super::memory::Block;
+use super::memory::Arena;
 use crate::core::LibraryBinary;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -401,7 +401,8 @@ impl CarriedScope {
 
 /// What an answer carrying a definition frees at its end: its blocks, each through the release its description names.
 pub(crate) struct KeptBlocks {
-    pub(crate) blocks: Vec<Block>,
+    /// The call's arena, which holds the answer blocks the releases free.
+    pub(crate) arena: Arena,
     pub(crate) releases: Vec<(usize, ReleaseCall)>,
     pub(crate) mapping: Mapping,
 }
@@ -413,7 +414,7 @@ impl KeptBlocks {
                 release.free(*pointer);
             }
         }
-        drop(self.blocks);
+        drop(self.arena);
     }
 }
 
