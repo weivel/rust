@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use super::entry::{Entry, HostOptions, HostScheduler, Outcome};
+use super::libraries::LoadedLibrary;
 use crate::context::{Context, Contexts, HostLog, LogRecord, Pending, Settle, pending};
 use crate::core::{
     Answer, Core, CoreBinary, Failure, FailureKind, Handle, LedgerRow, Manifest, Wrapping,
@@ -22,8 +23,35 @@ pub(super) struct PluginRecord {
     pub(super) entry: Arc<dyn Entry>,
     pub(super) context: Option<Context>,
     pub(super) in_flight: Option<InFlight>,
+    /// Whether the activate of the plugin's current open was called, so its release owes a deactivate.
     pub(super) activate_called: bool,
+    /// True from the call of the activate until that call returned; a release waits for it.
+    pub(super) activate_running: bool,
+    /// True while a settled activate is verified or quarantined; a release waits for it.
+    pub(super) settling: bool,
     pub(super) release: Option<Pending<Result<bool, Answer>>>,
+    /// What settles a release asked for while the activate ran or settled, which begins once neither does.
+    pub(super) waiting_release: Option<Settle<Result<bool, Answer>>>,
+}
+
+impl PluginRecord {
+    pub(super) fn is_busy(&self) -> bool {
+        self.activate_running || self.settling
+    }
+}
+
+/// What a destroy waits for before it disarms the timer and destroys the core.
+#[derive(Default)]
+pub(super) struct UnderWay {
+    pub(super) opens: u32,
+    pub(super) settlings: u32,
+    pub(super) releases: u32,
+}
+
+impl UnderWay {
+    fn is_quiet(&self) -> bool {
+        self.opens == 0 && self.settlings == 0 && self.releases == 0
+    }
 }
 
 #[derive(Default)]
@@ -32,6 +60,39 @@ pub(super) struct Records {
     pub(super) opened: Vec<Handle>,
     pub(super) last_serial: u64,
     pub(super) destroy: Option<Pending<()>>,
+    pub(super) destroy_finished: bool,
+    pub(super) under_way: UnderWay,
+    /// The destroy's last steps, kept until nothing it waits for is under way.
+    pub(super) destroy_end: Option<Box<dyn FnOnce() + Send>>,
+    /// How many registrations of the host's own each id has standing, a library's among them.
+    pub(super) host_services: HashMap<String, u32>,
+    /// The ids the host's own registrations have claimed and the core has not answered yet.
+    pub(super) host_service_claims: HashMap<String, u32>,
+    /// The C libraries the host loaded and has not unloaded.
+    pub(super) libraries: Vec<LoadedLibrary>,
+}
+
+impl Records {
+    /// Whether a registration of the host's own, its claim, or a live library holds `id`.
+    pub(super) fn is_taken(&self, id: &str) -> bool {
+        self.host_services.contains_key(id)
+            || self.host_service_claims.contains_key(id)
+            || self.libraries.iter().any(|library| library.declares(id))
+    }
+}
+
+pub(super) fn change_count(counts: &mut HashMap<String, u32>, id: &str, up: bool) {
+    let count = counts.get(id).copied().unwrap_or(0);
+    let changed = if up {
+        count + 1
+    } else {
+        count.saturating_sub(1)
+    };
+    if changed == 0 {
+        counts.remove(id);
+    } else {
+        counts.insert(id.to_owned(), changed);
+    }
 }
 
 pub(super) struct HostShared {
@@ -39,11 +100,13 @@ pub(super) struct HostShared {
     pub(super) timer: Arc<CoreTimer>,
     pub(super) contexts: Contexts,
     pub(super) system_scheduler: Mutex<Option<Arc<SystemScheduler>>>,
+    pub(super) description_check: Option<Arc<dyn super::DescriptionCheck>>,
     pub(super) records: Mutex<Records>,
 }
 
-/// Registers plugins written in Rust, activates, verifies and releases them, and destroys them with the core, as the
-/// core's `docs/contract/host.md` asks. Cloning it shares the host. Any thread may call.
+/// Registers plugins written in Rust, activates, verifies and releases them, offers host services, loads C libraries
+/// as host services, and destroys them with the core, as the core's `docs/contract/host.md` asks. Cloning it shares
+/// the host. Any thread may call.
 #[derive(Clone)]
 pub struct Host {
     pub(super) shared: Arc<HostShared>,
@@ -88,6 +151,7 @@ impl Host {
                 timer,
                 contexts,
                 system_scheduler: Mutex::new(system),
+                description_check: options.description_check.clone(),
                 records: Mutex::new(Records::default()),
             }),
         })
@@ -107,7 +171,10 @@ impl Host {
                 context: None,
                 in_flight: None,
                 activate_called: false,
+                activate_running: false,
+                settling: false,
                 release: None,
+                waiting_release: None,
             },
         );
         Ok(plugin)
@@ -141,8 +208,9 @@ impl Host {
 
     /// Destroys the host: releases every plugin it opened in the reverse of the order it opened them, one whose
     /// activate is in flight and one quarantined included, lets every event and deferred step of those releases run,
-    /// then disarms the timer and destroys the core. The result settles once all of it has run; a second destroy
-    /// answers the first one's.
+    /// waits for every open, settling and release under way, closes every C library it loaded to calls, then disarms
+    /// the timer and destroys the core. The result settles once all of it has run; a second destroy answers the first
+    /// one's.
     pub fn destroy(&self) -> Pending<()> {
         let (destroyed, settle) = pending();
         let opened = {
@@ -185,6 +253,43 @@ fn scheduler_of(choice: &HostScheduler) -> Result<ChosenScheduler, Answer> {
     }
 }
 
+/// Counts one thing a destroy waits for while it lives, and lets a waiting destroy end once it was the last.
+pub(super) struct UnderWayMark {
+    shared: Arc<HostShared>,
+    count: fn(&mut UnderWay) -> &mut u32,
+}
+
+impl UnderWayMark {
+    pub(super) fn opening(shared: &Arc<HostShared>, records: &mut Records) -> UnderWayMark {
+        UnderWayMark::counted(shared, records, |under_way| &mut under_way.opens)
+    }
+
+    pub(super) fn settling(shared: &Arc<HostShared>, records: &mut Records) -> UnderWayMark {
+        UnderWayMark::counted(shared, records, |under_way| &mut under_way.settlings)
+    }
+
+    fn counted(
+        shared: &Arc<HostShared>,
+        records: &mut Records,
+        count: fn(&mut UnderWay) -> &mut u32,
+    ) -> UnderWayMark {
+        *count(&mut records.under_way) += 1;
+        UnderWayMark {
+            shared: shared.clone(),
+            count,
+        }
+    }
+}
+
+impl Drop for UnderWayMark {
+    fn drop(&mut self) {
+        let mut records = self.shared.records();
+        let count = (self.count)(&mut records.under_way);
+        *count = count.saturating_sub(1);
+        HostShared::end_the_destroy_when_quiet(&self.shared, records);
+    }
+}
+
 impl HostShared {
     pub(super) fn records(&self) -> MutexGuard<'_, Records> {
         self.records
@@ -204,8 +309,8 @@ impl HostShared {
         });
     }
 
-    /// Releases each plugin the destroy found opened, one after the other, then finishes once the last release and
-    /// everything it queued has run.
+    /// Releases each plugin the destroy found opened, one after the other, then ends the destroy once the last
+    /// release, and everything under way that the destroy waits for, has finished.
     fn release_for_the_destroy(
         shared: &Arc<HostShared>,
         mut opened: Vec<Handle>,
@@ -213,10 +318,15 @@ impl HostShared {
     ) {
         let Some(plugin) = opened.first().copied() else {
             let finishing = shared.clone();
-            shared.run_deferred(move || {
-                finishing.finish_the_destroy();
-                settle.settle(());
-            });
+            let mut records = shared.records();
+            records.destroy_end = Some(Box::new(move || {
+                let ending = finishing.clone();
+                finishing.run_deferred(move || {
+                    ending.finish_the_destroy();
+                    settle.settle(());
+                });
+            }));
+            HostShared::end_the_destroy_when_quiet(shared, records);
             return;
         };
         opened.remove(0);
@@ -226,6 +336,21 @@ impl HostShared {
                 HostShared::release_for_the_destroy(&shared, opened, settle);
             }
         });
+    }
+
+    /// Runs the destroy's last steps once nothing it waits for is under way, letting go of the records first.
+    pub(super) fn end_the_destroy_when_quiet(
+        _: &Arc<HostShared>,
+        mut records: MutexGuard<'_, Records>,
+    ) {
+        if !records.under_way.is_quiet() {
+            return;
+        }
+        let Some(end) = records.destroy_end.take() else {
+            return;
+        };
+        drop(records);
+        end();
     }
 
     /// Runs `step` on the dispatch queue behind everything queued, or at once once the core is destroyed and no
@@ -246,8 +371,10 @@ impl HostShared {
     }
 
     fn finish_the_destroy(&self) {
+        self.close_every_library();
         self.timer.destroy();
         self.core.destroy();
+        self.records().destroy_finished = true;
         let _ = self.contexts.close();
         let system = self
             .system_scheduler

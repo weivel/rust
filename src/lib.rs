@@ -14,10 +14,8 @@ pub mod timer;
 #[forbid(unsafe_code)]
 pub mod context;
 
-#[forbid(unsafe_code)]
 pub mod host;
 
 pub mod standard;
 
-#[forbid(unsafe_code)]
 pub mod conformance;

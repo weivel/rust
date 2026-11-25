@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use super::log::HostLog;
 use super::plugin::ContextInner;
-use super::records::{Record, Table, WantRecord, WantSettlement};
+use super::records::{Record, Releases, Table, WantRecord, WantSettlement};
 use crate::core::{Answer, Core, Failure, FailureKind, Handle, Hold, panic_text};
 use crate::handles::HandleKind;
 use crate::timer::CoreTimer;
@@ -21,6 +21,7 @@ pub(crate) struct ContextState {
     pub(crate) handles: Table,
     pub(crate) timer: Arc<CoreTimer>,
     pub(crate) host_log: Arc<dyn HostLog>,
+    pub(crate) releases: Releases,
 }
 
 impl ContextState {

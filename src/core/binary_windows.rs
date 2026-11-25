@@ -47,9 +47,7 @@ pub(super) fn find(handle: *mut c_void, name: &CStr) -> *mut c_void {
     unsafe { GetProcAddress(handle, name.as_ptr()) }
 }
 
-pub(super) fn close(handle: *mut c_void) {
-    // SAFETY: `handle` came from `LoadLibraryW` and is freed exactly once, by the library's drop.
-    unsafe {
-        FreeLibrary(handle);
-    }
+pub(super) fn close(handle: *mut c_void) -> bool {
+    // SAFETY: `handle` came from `LoadLibraryW` and is freed exactly once.
+    unsafe { FreeLibrary(handle) != 0 }
 }

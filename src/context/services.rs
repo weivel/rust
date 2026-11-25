@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use super::pending::{Pending, pending};
 use super::plugin::Context;
 use super::records::{
-    CapacityAnswerer, Object, Record, ServiceWatcher, WantRecord, WantSettlement,
+    Awaiting, CapacityAnswerer, Object, Record, Released, Revocation, ServiceWatcher, WantRecord,
+    WantSettlement,
 };
 use crate::core::{Answer, FailureKind, Handle, WantOptions};
 use crate::handles::HandleKind;
@@ -111,10 +112,16 @@ impl ServiceRegistration {
 
     /// Unregisters the service.
     pub fn unregister(&self) -> Result<(), Answer> {
+        self.unregister_then(|| {})
+    }
+
+    /// Unregisters the service, running `unregistered` under the layer lock once the core answered it.
+    pub(crate) fn unregister_then(&self, unregistered: impl FnOnce()) -> Result<(), Answer> {
         let state = &self.context.inner.state;
         state.call(&self.context.inner, |hold| {
             hold.unregister(self.registration)?;
             state.handles.end(self.registration);
+            unregistered();
             Ok(())
         })
     }
@@ -246,7 +253,7 @@ impl Context {
     /// It offers no capacity answerer, so a constrained want's questions about it are answered with no live
     /// attributes and that it serves every consumer.
     pub fn register(&self, id: &str, service: Object) -> Result<ServiceRegistration, Answer> {
-        self.register_with(id, service, None)
+        self.register_with(id, service, Registering::default())
     }
 
     /// Registers `service` under `id` as [`Context::register`] does, with what answers a constrained want's
@@ -257,30 +264,108 @@ impl Context {
         service: Object,
         answerer: Arc<dyn CapacityAnswerer>,
     ) -> Result<ServiceRegistration, Answer> {
-        self.register_with(id, service, Some(answerer))
+        self.register_with(
+            id,
+            service,
+            Registering {
+                answerer: Some(answerer),
+                ..Registering::default()
+            },
+        )
     }
 
-    fn register_with(
+    /// Registers `service` under `id` as [`Context::register`] does, awaiting releases: once it is unregistered, by
+    /// the plugin or by its stop, each holder keeps its holding until it lets go of the object, and once the last has,
+    /// this plugin hears [`PluginEvent::HoldingsReleased`], so whatever stood behind the object may be freed. It hears
+    /// it as any event about it: one its own release or quarantine queued still reaches it, and one queued after
+    /// those events, or after its forget, reaches no one.
+    ///
+    /// [`PluginEvent::HoldingsReleased`]: super::PluginEvent::HoldingsReleased
+    pub fn register_awaiting_releases(
         &self,
         id: &str,
         service: Object,
-        answerer: Option<Arc<dyn CapacityAnswerer>>,
     ) -> Result<ServiceRegistration, Answer> {
+        self.register_with(
+            id,
+            service,
+            Registering {
+                awaiting: Some(None),
+                ..Registering::default()
+            },
+        )
+    }
+
+    /// Lets go of what a revocation that awaits its release withdrew: the plugin no longer uses the object nor
+    /// anything it answered, and the core ends the holding. The revocation names the registration, so an object
+    /// registered under several is let go of under that one alone. A call through the object made afterwards is the
+    /// plugin's defect, as any use of memory after its free is. Answers true; false, calling nothing, for a revocation
+    /// that awaits no release, or one this plugin let go of already or was released or forgotten since; the core's
+    /// refusal.
+    pub fn release_holding(&self, revocation: &Revocation) -> Result<bool, Answer> {
+        let state = &self.inner.state;
+        if !revocation.awaits_release
+            || !state.releases.take_revoked(
+                self.plugin(),
+                revocation.registration,
+                &revocation.object,
+            )
+        {
+            return Ok(false);
+        }
+        let plugin = self.plugin();
+        state.call(&self.inner, |hold| {
+            hold.release_holding(plugin, revocation.registration)
+        })?;
+        Ok(true)
+    }
+
+    pub(crate) fn register_with(
+        &self,
+        id: &str,
+        service: Object,
+        registering: Registering<'_>,
+    ) -> Result<ServiceRegistration, Answer> {
+        let Registering {
+            answerer,
+            awaiting,
+            guard,
+            registered,
+        } = registering;
         let state = &self.inner.state;
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         let registration = state.call(&self.inner, |hold| {
-            let registration = hold.register_service(plugin, id)?;
+            if let Some(guard) = guard {
+                guard()?;
+            }
+            let registration = match awaiting {
+                Some(_) => hold.register_service_awaiting_releases(plugin, id)?,
+                None => hold.register_service(plugin, id)?,
+            };
             room.add(
                 HandleKind::ServiceRegistration,
                 registration,
                 Some(plugin),
                 Record::Service {
                     id: id.to_owned(),
-                    object: service,
+                    object: service.clone(),
                     answerer,
                 },
             );
+            if let Some(released) = awaiting {
+                state.releases.await_releases(
+                    registration,
+                    Awaiting {
+                        id: id.to_owned(),
+                        service,
+                        released,
+                    },
+                );
+            }
+            if let Some(registered) = registered {
+                registered();
+            }
             Ok(registration)
         })?;
         Ok(ServiceRegistration {
@@ -288,4 +373,17 @@ impl Context {
             registration,
         })
     }
+}
+
+/// How a registration is made beyond its id and object, each part run under the layer lock in the call's hold.
+#[derive(Default)]
+pub(crate) struct Registering<'a> {
+    /// What answers a constrained want's questions about it.
+    pub(crate) answerer: Option<Arc<dyn CapacityAnswerer>>,
+    /// `Some` to register awaiting releases, with what runs once nothing holds it any more.
+    pub(crate) awaiting: Option<Option<Released>>,
+    /// The caller's own check before the core is asked: an answer it gives is the registration's, the core not called.
+    pub(crate) guard: Option<Box<dyn FnOnce() -> Result<(), Answer> + 'a>>,
+    /// The caller's own record of the registration, once the core answered it.
+    pub(crate) registered: Option<Box<dyn FnOnce() + 'a>>,
 }

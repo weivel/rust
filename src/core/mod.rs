@@ -15,6 +15,7 @@ mod codes;
 #[doc(hidden)]
 pub mod declarations;
 mod event;
+mod library;
 mod marshal;
 mod read;
 mod table;
@@ -29,6 +30,8 @@ pub use codes::{
     PluginStatus, ReachKind, RefusalCode, WatchChange,
 };
 pub use event::{Event, EventPayload};
+pub(crate) use library::{BytesFunction, LibraryBinary, RefusedClose};
+pub use library::{DescribedDefinition, LibraryBytes};
 pub use table::{CoreBinary, LoadFailure};
 pub use values::{
     ActivationPlan, CapabilityImplementation, Capacity, ConstraintEntry, CoreOptions,
@@ -38,4 +41,6 @@ pub use values::{
 pub use wrapper::{
     Core, ErrorSink, Failure, FailureKind, Listener, ListenerRegistration, Wrapping,
 };
-pub(crate) use wrapper::{DeadlineHooks, Hold, HooksRegistration, panic_text};
+pub(crate) use wrapper::{
+    DeadlineHooks, Hold, HooksRegistration, panic_text, this_thread_dispatches,
+};

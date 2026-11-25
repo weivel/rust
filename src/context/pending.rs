@@ -111,13 +111,24 @@ impl<T: Clone> Pending<T> {
         }
     }
 
-    /// Blocks this thread until the result settles. A result settled by a dispatch this thread would run is never
-    /// waited for this way from inside that dispatch.
+    /// Blocks this thread until the result settles.
+    ///
+    /// # Panics
+    ///
+    /// On a thread that is dispatching a core's queue, or running a step as its dispatcher, while the result is not
+    /// settled: what settles it is most often that very dispatch, which would then never go on, so such a caller
+    /// hands the result a callback instead.
     pub fn wait(&self) -> T {
         let mut slot = self.shared.lock();
         loop {
             if let Slot::Settled(value) = &*slot {
                 return T::clone(value);
+            }
+            if crate::core::this_thread_dispatches() {
+                drop(slot);
+                panic!(
+                    "a result that has not settled was waited for on a thread dispatching the core's queue, which                      would never settle it; hand it a callback with on_settled instead"
+                );
             }
             slot = self
                 .shared

@@ -21,7 +21,7 @@ pub use log::{HostLog, LogRecord, PluginLog};
 pub use pending::{Pending, Settle, pending};
 pub use plugin::{Context, Listening};
 pub use records::{
-    CapabilityWatcher, CapacityAnswerer, Object, PluginEvent, PluginListener, ServiceWatcher,
-    WantSettlement,
+    CapabilityWatcher, CapacityAnswerer, ForeignObject, Object, PluginEvent, PluginListener,
+    Revocation, ServiceWatcher, WantSettlement, address_of,
 };
 pub use services::{ServiceRegistration, Want, WantLimits, Watching};

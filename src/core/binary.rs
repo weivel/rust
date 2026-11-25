@@ -10,7 +10,7 @@ mod platform;
 #[path = "binary_windows.rs"]
 mod platform;
 
-/// An open shared library, closed when dropped.
+/// An open shared library, closed when dropped or by [`SharedLibrary::close`].
 pub(crate) struct SharedLibrary {
     handle: *mut c_void,
 }
@@ -35,10 +35,18 @@ impl SharedLibrary {
         let address = platform::find(self.handle, name);
         (!address.is_null()).then_some(address)
     }
+
+    /// Closes the library now, answering whether the platform's loader closed it.
+    pub(crate) fn close(mut self) -> bool {
+        let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
+        platform::close(handle)
+    }
 }
 
 impl Drop for SharedLibrary {
     fn drop(&mut self) {
-        platform::close(self.handle);
+        if !self.handle.is_null() {
+            platform::close(self.handle);
+        }
     }
 }

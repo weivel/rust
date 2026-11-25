@@ -5,7 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
 use super::entry::{Activation, ActivationState, Finished, Outcome};
-use super::state::{Host, HostShared, InFlight};
+use super::state::{Host, HostShared, InFlight, UnderWayMark};
 use crate::context::{Context, Pending, Verification, pending};
 use crate::core::{
     Answer, EdgeSource, FailureKind, Handle, QuarantineReason, RefusalCode, RefusalStatus,
@@ -13,11 +13,11 @@ use crate::core::{
 };
 
 impl Host {
-    /// Activates `plugins` with the plan the core draws from `edge_source`: starts each in plan order without waiting
-    /// for one activate before the next, and returns once every activate has been started, with the plan and each
-    /// plugin's outcome to come. Where no dispatch runs, this thread starts the plan as the dispatcher, so what an
-    /// activate's own calls queue is dispatched once every activate of the plan has been called. A plan the core
-    /// refuses is answered as that refusal.
+    /// Activates `plugins` with the plan the core draws from `edge_source`, every service of the host's own counted as
+    /// provided by the host: starts each in plan order without waiting for one activate before the next, and returns
+    /// once every activate has been started, with the plan and each plugin's outcome to come. Where no dispatch runs,
+    /// this thread starts the plan as the dispatcher, so what an activate's own calls queue is dispatched once every
+    /// activate of the plan has been called. A plan the core refuses is answered as that refusal.
     pub fn activate(
         &self,
         plugins: &[Handle],
@@ -26,10 +26,18 @@ impl Host {
         if self.shared.is_destroy_called() {
             return Err(Answer::Destroyed);
         }
-        let plan = self
+        let host_provided: Vec<String> = self
             .shared
-            .core
-            .plan_activation(plugins, edge_source, None)?;
+            .records()
+            .host_services
+            .keys()
+            .cloned()
+            .collect();
+        let plan = self.shared.core.plan_activation(
+            plugins,
+            edge_source,
+            (!host_provided.is_empty()).then_some(host_provided.as_slice()),
+        )?;
         let outcomes = Arc::new(Mutex::new(Vec::with_capacity(plan.order.len())));
         let starting = || {
             for plugin in &plan.order {
@@ -74,24 +82,16 @@ impl Host {
         };
         let Some(context) = context else {
             self.shared.core.verify_activation(plugin)?;
-            return Ok(active(plugin));
+            return Ok(answered_outcome(plugin, ActivationState::Active));
         };
         let verification = self.shared.contexts.verify(&context)?;
         Ok(outcome_of(plugin, verification))
     }
 }
 
-fn active(plugin: Handle) -> Outcome {
-    Outcome {
-        plugin,
-        state: ActivationState::Active,
-        refusal: None,
-    }
-}
-
 fn outcome_of(plugin: Handle, verification: Verification) -> Outcome {
     match verification {
-        Verification::Verified => active(plugin),
+        Verification::Verified => answered_outcome(plugin, ActivationState::Active),
         Verification::Quarantined(refusal) => Outcome {
             plugin,
             state: ActivationState::Quarantined,
@@ -100,22 +100,28 @@ fn outcome_of(plugin: Handle, verification: Verification) -> Outcome {
     }
 }
 
-fn answered(plugin: Handle, state: ActivationState) -> Pending<Outcome> {
-    Pending::settled(Outcome {
+fn answered_outcome(plugin: Handle, state: ActivationState) -> Outcome {
+    Outcome {
         plugin,
         state,
         refusal: None,
-    })
+    }
+}
+
+fn answered(plugin: Handle, state: ActivationState) -> Pending<Outcome> {
+    Pending::settled(answered_outcome(plugin, state))
 }
 
 impl HostShared {
-    /// Opens one plugin of the plan and calls its activate, answering its outcome to come.
+    /// Opens one plugin of the plan and calls its activate, answering its outcome to come. The destroy waits for the
+    /// open from here until it has an outcome.
     fn start(shared: &Arc<HostShared>, plugin: Handle) -> Pending<Outcome> {
-        let context = {
+        let (context, _opening) = {
             let mut records = shared.records();
             if records.destroy.is_some() {
                 return answered(plugin, ActivationState::Released);
             }
+            let opening = UnderWayMark::opening(shared, &mut records);
             let Some(record) = records.plugins.get_mut(&plugin) else {
                 drop(records);
                 return shared.failed(
@@ -123,13 +129,14 @@ impl HostShared {
                     "the core planned a plugin the host holds no record of",
                 );
             };
-            match &record.context {
+            let context = match &record.context {
                 Some(context) => Ok(context.clone()),
                 None => shared
                     .contexts
                     .make(plugin, record.manifest.clone())
                     .inspect(|made| record.context = Some(made.clone())),
-            }
+            };
+            (context, opening)
         };
         let context = match context {
             Ok(context) => context,
@@ -140,6 +147,10 @@ impl HostShared {
                 );
             }
         };
+        HostShared::open(shared, plugin, context)
+    }
+
+    fn open(shared: &Arc<HostShared>, plugin: Handle, context: Context) -> Pending<Outcome> {
         let mut held_open = false;
         match shared.contexts.open(&context, || held_open = true) {
             Ok(()) => HostShared::activated(shared, plugin, context),
@@ -151,6 +162,7 @@ impl HostShared {
                 state: ActivationState::Refused,
                 refusal,
             }),
+            Err(Answer::Destroyed) => answered(plugin, ActivationState::Released),
             Err(other) => {
                 let detail = format!(
                     "a plugin's open failed for a reason other than the core's refusal: {other}"
@@ -170,7 +182,8 @@ impl HostShared {
     }
 
     /// Takes a plugin the core opened as activating and calls its activate, unless the destroy began meanwhile: it is
-    /// then released at once without its activate being called.
+    /// then released at once without its activate being called. A release asked for while the activate runs waits for
+    /// it to return, so no deactivate runs before its activate.
     fn activated(shared: &Arc<HostShared>, plugin: Handle, context: Context) -> Pending<Outcome> {
         let (outcome, settle) = pending();
         let (serial, entry) = {
@@ -183,6 +196,7 @@ impl HostShared {
             let Some(record) = records.plugins.get_mut(&plugin) else {
                 return answered(plugin, ActivationState::Failed);
             };
+            record.activate_called = !destroying;
             if destroying {
                 drop(records);
                 HostShared::release_record(shared, plugin);
@@ -192,31 +206,35 @@ impl HostShared {
                 serial,
                 settle: Some(settle),
             });
-            record.activate_called = true;
+            record.activate_running = true;
             (serial, record.entry.clone())
         };
         let activating = catch_unwind(AssertUnwindSafe(|| entry.activate(&context)));
         match activating {
             Err(payload) => {
-                shared.settle(plugin, serial, Err(panic_text(&*payload)));
+                HostShared::settle(shared, plugin, serial, Err(panic_text(&*payload)));
             }
             Ok(activating) => {
                 let settling: Weak<HostShared> = Arc::downgrade(shared);
                 activating.on_settled(move |finished| {
                     if let Some(shared) = settling.upgrade() {
-                        shared.settle(plugin, serial, finished.clone());
+                        HostShared::settle(&shared, plugin, serial, finished.clone());
                     }
                 });
             }
         }
+        if let Some(record) = shared.records().plugins.get_mut(&plugin) {
+            record.activate_running = false;
+        }
+        HostShared::begin_a_waiting_release(shared, plugin);
         outcome
     }
 
     /// Verifies or quarantines a plugin whose activate settled, unless it was released or the destroy called since,
-    /// and answers its outcome.
-    fn settle(&self, plugin: Handle, serial: u64, finished: Finished) {
-        let (settle, context) = {
-            let mut records = self.records();
+    /// and answers its outcome. A release asked for meanwhile waits for it, and the destroy waits for it too.
+    fn settle(shared: &Arc<HostShared>, plugin: Handle, serial: u64, finished: Finished) {
+        let (settle, context, _settling) = {
+            let mut records = shared.records();
             if records.destroy.is_some() {
                 return;
             }
@@ -230,29 +248,35 @@ impl HostShared {
             let Some(settle) = in_flight.settle.take() else {
                 return;
             };
-            (settle, record.context.clone())
+            record.settling = true;
+            let context = record.context.clone();
+            let settling = UnderWayMark::settling(shared, &mut records);
+            (settle, context, settling)
         };
         let outcome = match (context, finished) {
             (None, _) => answered_outcome(plugin, ActivationState::Failed),
-            (Some(context), Ok(())) => self.verified(plugin, &context),
+            (Some(context), Ok(())) => shared.verified(plugin, &context),
             (Some(context), Err(failure)) => {
                 let reason = QuarantineReason {
                     code: RefusalCode::NONE,
                     detail: format!("its activate failed: {}", failure.replace('\0', "\\0")),
                     fix: "make the plugin's activate complete normally".to_owned(),
                 };
-                answered_outcome(plugin, self.quarantined(&context, &reason))
+                answered_outcome(plugin, shared.quarantined(&context, &reason))
             }
         };
-        if let Some(record) = self.records().plugins.get_mut(&plugin)
-            && record
+        if let Some(record) = shared.records().plugins.get_mut(&plugin) {
+            record.settling = false;
+            if record
                 .in_flight
                 .as_ref()
                 .is_some_and(|run| run.serial == serial)
-        {
-            record.in_flight = None;
+            {
+                record.in_flight = None;
+            }
         }
         settle.settle(outcome);
+        HostShared::begin_a_waiting_release(shared, plugin);
     }
 
     fn verified(&self, plugin: Handle, context: &Context) -> Outcome {
@@ -280,13 +304,5 @@ impl HostShared {
                 ActivationState::Failed
             }
         }
-    }
-}
-
-fn answered_outcome(plugin: Handle, state: ActivationState) -> Outcome {
-    Outcome {
-        plugin,
-        state,
-        refusal: None,
     }
 }

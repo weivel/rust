@@ -4,11 +4,12 @@ use std::sync::{Arc, Weak};
 
 use super::log::HostLog;
 use super::plugin::Context;
-use super::records::{Record, Table};
+use super::records::{Object, Record, Releases, Table};
+use super::services::{Registering, ServiceRegistration};
 use super::state::ContextState;
 use crate::core::{
-    Answer, Core, Event, Handle, ListenerRegistration, Manifest, QuarantineReason, Refusal,
-    RefusalStatus,
+    Answer, Core, Event, FailureKind, Handle, ListenerRegistration, Manifest, QuarantineReason,
+    Refusal, RefusalStatus,
 };
 use crate::handles::HandleKind;
 use crate::timer::CoreTimer;
@@ -35,6 +36,7 @@ pub enum Verification {
 pub struct Contexts {
     state: Arc<ContextState>,
     routing: ListenerRegistration,
+    host: Context,
 }
 
 impl Contexts {
@@ -49,6 +51,7 @@ impl Contexts {
             handles: Table::default(),
             timer,
             host_log,
+            releases: Releases::default(),
         });
         let routed: Weak<ContextState> = Arc::downgrade(&state);
         let routing = core.add_listener(Arc::new(move |_: &Core, event: &Event| {
@@ -56,7 +59,63 @@ impl Contexts {
                 state.route(event);
             }
         }))?;
-        Ok(Contexts { state, routing })
+        let host = Context::new(
+            state.clone(),
+            Handle::HOST,
+            Manifest {
+                import_name: "host".to_owned(),
+                ..Manifest::default()
+            },
+        );
+        Ok(Contexts {
+            state,
+            routing,
+            host,
+        })
+    }
+
+    /// Registers a service the host itself supplies under `WEIVEL_HOST`, whose object is answered to a consumer as any
+    /// provider's is; no release or quarantine ends it, only its unregistration or the core's destroy. `guard` runs
+    /// under the layer lock before the core is asked, and an answer it gives is the registration's, the core not
+    /// called; `registered` runs under the layer lock once the core answered. Neither may call into the core.
+    pub fn register_host_service(
+        &self,
+        id: &str,
+        service: Object,
+        guard: impl FnOnce() -> Result<(), Answer>,
+        registered: impl FnOnce(),
+    ) -> Result<ServiceRegistration, Answer> {
+        self.host.register_with(
+            id,
+            service,
+            Registering {
+                guard: Some(Box::new(guard)),
+                registered: Some(Box::new(registered)),
+                ..Registering::default()
+            },
+        )
+    }
+
+    /// Registers a service of the host's own as [`Contexts::register_host_service`] does, awaiting releases:
+    /// unregistering it revokes it to every holder, each holding lasting until its holder lets go of it or is
+    /// released, quarantined or forgotten. Once the last has ended `released` runs, from the dispatch, or when the
+    /// contexts are closed for one the destroy found still registered.
+    pub fn register_host_service_awaiting_releases(
+        &self,
+        id: &str,
+        service: Object,
+        registered: impl FnOnce(),
+        released: impl FnOnce() + Send + 'static,
+    ) -> Result<ServiceRegistration, Answer> {
+        self.host.register_with(
+            id,
+            service,
+            Registering {
+                awaiting: Some(Some(Box::new(released))),
+                registered: Some(Box::new(registered)),
+                ..Registering::default()
+            },
+        )
     }
 
     /// Builds the context of a plugin the core registered, which hears no event drained before it was made. Answers
@@ -187,6 +246,16 @@ impl Contexts {
 
     fn free(&self) {
         let _ = self.state.core.remove_listener(self.routing);
+        for awaiting in self.state.releases.take_every_awaiting() {
+            if let Some(released) = awaiting.released {
+                self.state.call_back(
+                    released,
+                    FailureKind::LayerDefect,
+                    "the record of a released registration panicked",
+                    None,
+                );
+            }
+        }
         for entry in self.state.handles.clear() {
             match entry.record {
                 Record::Want(want) => {
@@ -212,11 +281,21 @@ impl Drop for Contexts {
 fn end_entries(handles: &Table, context: &Context) {
     context.silence();
     handles.end_owned(context.plugin(), ENDED_WITH_THE_PLUGIN);
+    context
+        .inner
+        .state
+        .releases
+        .drop_revoked_of(context.plugin());
     context.drop_listeners();
 }
 
 fn end_forgotten(handles: &Table, context: &Context) {
     handles.end_owned(context.plugin(), ENDED_WITH_THE_PLUGIN);
+    context
+        .inner
+        .state
+        .releases
+        .drop_revoked_of(context.plugin());
     handles.end(context.plugin());
     handles.drop_holdings(context.plugin());
     context.drop_listeners();

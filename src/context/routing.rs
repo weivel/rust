@@ -1,7 +1,7 @@
 //! The one listener on the core that routes each event to the plugin it concerns, by the handle it names.
 
 use super::plugin::Context;
-use super::records::{Object, PluginEvent, Record};
+use super::records::{Object, PluginEvent, Record, Revocation};
 use super::state::ContextState;
 use crate::core::{
     Answer, CapabilityChange, Capacity, CapacityQuestion, Event, EventPayload, FailureKind, Handle,
@@ -38,6 +38,10 @@ impl ContextState {
                 plugin,
                 implementation,
             } => self.revoked(event, *plugin, *implementation),
+            EventPayload::HoldingsReleased {
+                owner,
+                registration,
+            } => self.holdings_released(event, *owner, *registration),
             EventPayload::ReachRefused {
                 kind,
                 plugin,
@@ -187,14 +191,48 @@ impl ContextState {
         }
     }
 
+    /// Drops the holding the revocation names, even for a plugin forgotten, and tells the plugin of it. A holding of a
+    /// registration made awaiting releases is kept, revoked, until the plugin lets go of the object.
     fn revoked(&self, event: &Event, plugin: Handle, implementation: Handle) {
         let Some(object) = self.handles.revoke(plugin, implementation) else {
             return;
         };
+        let awaits_release = self.releases.awaits(implementation);
+        if awaits_release {
+            self.releases
+                .keep_revoked(plugin, implementation, object.clone());
+        }
         if let Some(context) = self.context_of(plugin, event) {
-            context.tell(&PluginEvent::Revoked {
+            context.tell(&PluginEvent::Revoked(Revocation {
                 object,
                 registration: implementation,
+                awaits_release,
+            }));
+        }
+    }
+
+    /// Hands the end of a registration's last holding to its owner: the host's own record runs, and a plugin hears it
+    /// as it hears any event about it, so one its own release or quarantine queued still reaches it, and one queued
+    /// after those events, or after its forget, reaches no one.
+    fn holdings_released(&self, event: &Event, owner: Handle, registration: Handle) {
+        let Some(awaiting) = self.releases.released(registration) else {
+            return;
+        };
+        if let Some(released) = awaiting.released {
+            self.call_back(
+                released,
+                FailureKind::LayerDefect,
+                "the record of a released registration panicked",
+                Some(event.sequence),
+            );
+        }
+        if owner == Handle::HOST {
+            return;
+        }
+        if let Some(context) = self.context_of(owner, event) {
+            context.tell(&PluginEvent::HoldingsReleased {
+                id: awaiting.id,
+                service: awaiting.service,
             });
         }
     }
