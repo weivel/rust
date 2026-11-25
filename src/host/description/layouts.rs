@@ -60,7 +60,9 @@ pub(crate) struct Visible {
 /// The layouts of every struct one description names, built once at the load.
 #[derive(Debug)]
 pub(crate) struct Layouts {
-    types: BTreeMap<String, LaidOut>,
+    /// Each struct by name, found by an equality scan, which rejects most names on their length alone where an ordered
+    /// map compares the common prefix every name of one description shares.
+    types: Vec<(String, LaidOut)>,
 }
 
 const POINTER_SIZE: usize = size_of::<*const c_void>();
@@ -295,7 +297,7 @@ impl Layouts {
         }
         builder.check_member_sizes()?;
         let layouts = Layouts {
-            types: builder.built,
+            types: builder.built.into_iter().collect(),
         };
         for described in &description.types {
             for member in &described.members {
@@ -322,7 +324,11 @@ impl Layouts {
 
     /// The struct named `name`; the check proved every name a description uses names one, so none is only a defect.
     pub(crate) fn laid_out(&self, name: Option<&str>) -> Option<&LaidOut> {
-        self.types.get(name?)
+        let name = name?;
+        self.types
+            .iter()
+            .find(|(held, _)| held == name)
+            .map(|(_, laid_out)| laid_out)
     }
 
     /// How many bytes one element of an array of `element` takes, `type_name` naming a struct element.

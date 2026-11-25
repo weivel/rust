@@ -228,12 +228,6 @@ impl<'layouts> Walk<'layouts, '_> {
         self.parts.pop().map_or(PLACEHOLDER, |root| root.value)
     }
 
-    fn set_member(&mut self, at: usize, position: u32, value: Value) {
-        if let Value::Struct(members) = &mut self.parts[at].value {
-            members.push_named(position, value);
-        }
-    }
-
     /// # Safety
     /// `address` holds the struct `laid_out`, as its provider filled it.
     unsafe fn read_struct(
@@ -249,6 +243,10 @@ impl<'layouts> Walk<'layouts, '_> {
             ));
         }
         let described = &laid_out.described;
+        let Value::Struct(mut members) = std::mem::replace(&mut self.parts[at].value, PLACEHOLDER)
+        else {
+            unreachable!("a struct is read only into the part made for it")
+        };
         for (position, visible) in laid_out.visible.iter().enumerate() {
             let member = &described.members[visible.index];
             let position = position as u32;
@@ -257,15 +255,27 @@ impl<'layouts> Walk<'layouts, '_> {
                 // SAFETY: a count is a SIZE member of the same struct.
                 .map_or(0, |offset| unsafe { get::<usize>(address + offset) });
             // SAFETY: as the caller promised.
-            unsafe { self.member(address + member.offset, member, position, count, depth, at)? };
+            unsafe {
+                self.member(
+                    address + member.offset,
+                    member,
+                    position,
+                    count,
+                    depth,
+                    at,
+                    &mut members,
+                )?
+            };
         }
+        self.parts[at].value = Value::Struct(members);
         Ok(())
     }
 
-    /// Reads one member into the struct at `at`, a struct or a node it reaches by a visit of its own.
+    /// Reads one member into `members`, the struct at `at`, a struct or a node it reaches by a visit of its own.
     ///
     /// # Safety
     /// `address` holds the member, as its provider filled it, and `count` is the member counting it.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn member(
         &mut self,
         address: usize,
@@ -274,11 +284,12 @@ impl<'layouts> Walk<'layouts, '_> {
         count: usize,
         depth: usize,
         at: usize,
+        members: &mut Members,
     ) -> Result<(), String> {
         // SAFETY: as the caller promised.
         unsafe {
             if let Some(scalar) = scalar_at(address, member.kind) {
-                self.set_member(at, position, scalar);
+                members.push_named(position, scalar);
                 return Ok(());
             }
             let type_name = member.type_name.as_deref();
@@ -313,11 +324,18 @@ impl<'layouts> Walk<'layouts, '_> {
                     )?;
                     return Ok(());
                 }
+                KIND_ARRAY if !matches!(member.element, KIND_STRUCT | KIND_VALUE) => {
+                    Value::Array(self.scalar_items(member.element, get(address), count))
+                }
                 KIND_ARRAY => {
                     let pointer = get(address);
-                    let array = self.part(Value::Array(Vec::new()), at, key());
-                    self.array(member.element, type_name, pointer, count, depth + 1, array)?;
-                    return Ok(());
+                    if pointer == 0 {
+                        Value::Array(Vec::new())
+                    } else {
+                        let array = self.part(Value::Array(Vec::new()), at, key());
+                        self.array(member.element, type_name, pointer, count, depth + 1, array)?;
+                        return Ok(());
+                    }
                 }
                 kind => {
                     let pointer = get(address);
@@ -328,7 +346,7 @@ impl<'layouts> Walk<'layouts, '_> {
                     }
                 }
             };
-            self.set_member(at, position, value);
+            members.push_named(position, value);
         }
         Ok(())
     }
@@ -379,6 +397,23 @@ impl<'layouts> Walk<'layouts, '_> {
             at: part,
         });
         Ok(())
+    }
+
+    /// The `count` scalars of `element` at `pointer`, none for NULL, read where they are met rather than placed later.
+    ///
+    /// # Safety
+    /// `pointer` is NULL or `count` scalars of `element`.
+    unsafe fn scalar_items(&self, element: u32, pointer: usize, count: usize) -> Vec<Value> {
+        if pointer == 0 {
+            return Vec::new();
+        }
+        let stride = self.layouts.element_size(element, None).unwrap_or(0);
+        (0..count)
+            // SAFETY: as the caller promised.
+            .map(|index| {
+                unsafe { scalar_at(pointer + index * stride, element) }.unwrap_or(PLACEHOLDER)
+            })
+            .collect()
     }
 
     /// Reads `count` elements at `pointer` into the array part at `array`.
