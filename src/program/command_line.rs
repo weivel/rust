@@ -68,6 +68,12 @@ fn options_of(command_line: Vec<OsString>) -> Result<RunHostOptions, String> {
     Ok(options)
 }
 
+/// The code a process exits with for a run's exit code: the code modulo 256, as a process's exit status holds one
+/// byte on every platform the program runs on.
+pub fn process_exit_code(exit: u32) -> u8 {
+    (exit % 256) as u8
+}
+
 /// Runs the host program from its command line, without the program's own name, and answers the code to exit with,
 /// each terminate signal of the platform a stop request. The core and the standard are the shared libraries beside
 /// the program unless `--core` and `--standard` name others.

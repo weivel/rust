@@ -98,10 +98,29 @@ fn the_command_line_runs_an_action_plan_to_its_end_and_exits_with_stops_code() {
 
 #[cfg(unix)]
 #[test]
-fn a_terminate_signal_to_the_command_line_stops_its_serve_run() {
+fn sigterm_to_the_command_line_stops_its_serve_run() {
+    stops_its_serve_run_on("-TERM", "sigterm");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_to_the_command_line_stops_its_serve_run() {
+    stops_its_serve_run_on("-INT", "sigint");
+}
+
+#[test]
+fn an_exit_code_past_255_wraps_modulo_256() {
+    assert_eq!(weivel_rust::program::process_exit_code(7), 7);
+    assert_eq!(weivel_rust::program::process_exit_code(255), 255);
+    assert_eq!(weivel_rust::program::process_exit_code(256), 0);
+    assert_eq!(weivel_rust::program::process_exit_code(300), 44);
+}
+
+#[cfg(unix)]
+fn stops_its_serve_run_on(signal: &str, name: &str) {
     use std::time::{Duration, Instant};
     const BOUND: Duration = Duration::from_secs(30);
-    let directory = run_directory("signal");
+    let directory = run_directory(name);
     write(
         &directory.join("stub-host.json"),
         r#"{"mode": "serve", "exit": 4, "plugins": []}"#,
@@ -120,7 +139,7 @@ fn a_terminate_signal_to_the_command_line_stops_its_serve_run() {
         std::thread::sleep(Duration::from_millis(5));
     }
     let killed = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
+        .args([signal, &child.id().to_string()])
         .status()
         .expect("kill runs");
     assert!(killed.success());

@@ -24,8 +24,8 @@ unreadable, the vector's own words for each plugin under `plugins/<name>.json`, 
 it in the order the vector writes it, since a plan's arguments reach `finished` as written. Every plugin's entry is
 the test plugins library, loaded across the plugin seam by its symbol `host_vector_entry`, so the run exercises the
 program's entry symbol beside its default. A plugin learns where its words lie from `run_pointer_file`, a file of the
-process it runs in naming the standard and the run's directory, which is why the suite lays out one `host` run at a
-time, as `stub-host` itself keeps one run at a time. The driver sends the stop request once the record holds
+process it runs in naming the standard and the run's directory, which `point_runs_at` writes for one run at a time,
+waiting for the run before to end, and removes once its run has ended, as `stub-host` itself keeps one run at a time. The driver sends the stop request once the record holds
 `stopAfter`, writes `stop-sent` after the program has taken it, holds every wait to the kit's 30-second bound, and
 answers `record`, `exit` and `exitsNonZero` from the record and the exit code.
 
