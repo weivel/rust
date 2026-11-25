@@ -51,7 +51,7 @@ pub use offers::PluginOffer;
 pub use seam::{
     DEFAULT_ENTRY_SYMBOL, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext,
     SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamOffer, SeamRefusal, SeamText, SeamTexts,
-    SeamWant, SeamWantLimits, seam_entry,
+    SeamWant, SeamWantLimits, plugin_thread, seam_entry,
 };
 pub use services::HostService;
 pub use state::Host;

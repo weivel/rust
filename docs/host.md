@@ -117,17 +117,20 @@ names and calling one. A method's arguments and its answer cross as a value tree
 never JSON, and a contract's refusal crosses whole, its capability and operation kept.
 
 Each table is led by its `size`. A side refuses a table below its first shape, the fields it was first published with,
-reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either
-side may append fields without breaking the other. Neither side keeps a pointer into the other's memory past a call:
-each table it receives is copied, every text and list is lent for one call, of any length, and a call's answer is
-handed to the caller's own receiver before the call returns. A context and a completion cross as the host's id of
-them, found in the host's registry, so a call or a finish after the host let go of either answers destroyed or does
-nothing. When the host forgets a plugin it lets go of what it kept of it and tells the plugin's side to close and
-detach that context. When the host drops an entry, the seam's own thread tells the plugin's side to free its table and
-closes the library once no other entry of it is loaded, after every call any plugin made into the host has returned, so
-neither ever runs inside a call that returns into the library's code. A plugin's own threads must have left its code
-by the time it finishes its last activate or deactivate, since its library may close after that. Everything the host
-keeps of the seam is the host's own and goes with it, whether or not it was destroyed first.
+reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either side
+may append fields without breaking the other. Neither side keeps a pointer into the other's memory past a call: each
+table it receives is copied, every text and list is lent for one call, of any length, and a call's answer is handed to
+the caller's own receiver before the call returns. A context and a completion cross as the host's id of them, found in
+the host's registry, so a call or a finish after the host let go of either answers destroyed or does nothing. When the
+host forgets a plugin it lets go of what it kept of it and tells the plugin's side to close and detach that context.
+When the host drops an entry, the seam's own thread tells the plugin's side to free its table and closes the library
+once no other entry of it is loaded, after every call any plugin made into the host has returned, so neither ever runs
+inside a call that returns into the library's code. A plugin's `free` returns only after every thread it started has
+ended, and the host frees it on its retiring thread only after no plugin call into the host runs, so its library never
+closes under its own code; the library is never pinned, so a plugin stays replaceable while the host runs. The plugin's
+side keeps the rule for threads started through `plugin_thread` while the seam calls into the entry, or from such a
+thread: the entry's `free` joins each, as a thread that finishes a deactivate and runs on after the finish needs.
+Everything the host keeps of the seam is the host's own and goes with it, whether or not it was destroyed first.
 
 Every function on both sides catches a panic: a panic in a plugin's activate or deactivate is told to the host's error
 sink and finishes it as failed, so the host quarantines that plugin and goes on. A want made across the seam knows

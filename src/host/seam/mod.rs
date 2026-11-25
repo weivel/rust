@@ -13,6 +13,8 @@ mod plugin_side;
 #[cfg(test)]
 mod tests;
 #[forbid(unsafe_code)]
+mod threads;
+#[forbid(unsafe_code)]
 mod trees;
 
 use std::sync::{Mutex, MutexGuard};
@@ -25,6 +27,7 @@ pub use abi::{
 pub use host_side::DEFAULT_ENTRY_SYMBOL;
 pub(crate) use host_side::SeamRegistry;
 pub use plugin_side::seam_entry;
+pub use threads::plugin_thread;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex

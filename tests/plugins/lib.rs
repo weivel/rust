@@ -274,10 +274,11 @@ impl Entry for LateDeactivating {
 
     fn deactivate(&self) -> Option<Pending<Finished>> {
         let (later, settle) = weivel_rust::context::pending();
-        std::thread::spawn(move || {
+        weivel_rust::host::plugin_thread(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             settle.settle(Ok(()));
-        });
+        })
+        .expect("the thread starts");
         Some(later)
     }
 }
@@ -372,7 +373,12 @@ impl Entry for HostVectorPlugin {
             }
         }
         let (activating, settle) = weivel_rust::context::pending();
-        std::thread::spawn(move || settle.settle(run.activate()));
+        if let Err(error) = weivel_rust::host::plugin_thread(move || settle.settle(run.activate()))
+        {
+            return finished(Err(format!(
+                "the activation's thread did not start: {error}"
+            )));
+        }
         activating
     }
 

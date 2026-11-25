@@ -19,6 +19,7 @@ use super::abi::{
     lend_texts, read_answered, read_manifest, read_numbers, read_refusal, size_of_table,
 };
 use super::locked;
+use super::threads::PluginThreads;
 use super::trees::{answering_of, decode};
 use crate::context::{
     CapabilityWatcher, CapacityAnswerer, Context, ForeignObject, Object, PluginEvent, Revocation,
@@ -574,6 +575,7 @@ struct PluginSide {
     table: SeamEntry,
     entry: Arc<dyn Entry>,
     contexts: Mutex<HashMap<u64, (Arc<HostTable>, Context)>>,
+    threads: Arc<PluginThreads>,
 }
 
 impl PluginSide {
@@ -639,6 +641,7 @@ pub fn seam_entry<E: Entry + 'static>(make: impl FnOnce() -> Arc<E>) -> *const S
         },
         entry,
         contexts: Mutex::new(HashMap::new()),
+        threads: Arc::default(),
     }));
     // SAFETY: the side was just made and is the plugin's own until its `free`.
     unsafe {
@@ -694,7 +697,9 @@ unsafe extern "C" fn plugin_activate(
             Ok(context) => context,
             Err(refused) => return finisher.finish(&Err(refused)),
         };
-        match catch_unwind(AssertUnwindSafe(|| side.entry.activate(&context))) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            side.threads.within(|| side.entry.activate(&context))
+        })) {
             Ok(activating) => activating.on_settled(move |finished| finisher.finish(finished)),
             Err(payload) => finisher.finish(&Err(panicked(Some(&context), "activate", &*payload))),
         }
@@ -715,7 +720,9 @@ unsafe extern "C" fn plugin_deactivate(
     };
     let offered = catch_unwind(AssertUnwindSafe(|| {
         let side = side_of(data);
-        match catch_unwind(AssertUnwindSafe(|| side.entry.deactivate())) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            side.threads.within(|| side.entry.deactivate())
+        })) {
             Ok(None) => false,
             Ok(Some(deactivating)) => {
                 deactivating.on_settled(move |finished| finisher.finish(finished));
@@ -832,11 +839,13 @@ unsafe extern "C" fn plugin_hear(data: *const c_void, event: *const SeamEvent) {
         if !carries(event.size, EVENT_FIRST_SHAPE) {
             return;
         }
-        let Some((host, context)) = side_of(data).context_of(event.context) else {
+        let side = side_of(data);
+        let Some((host, context)) = side.context_of(event.context) else {
             return;
         };
         // SAFETY: as above.
-        unsafe { heard(&host, &context, event) };
+        side.threads
+            .within(|| unsafe { heard(&host, &context, event) });
     }));
 }
 
@@ -854,7 +863,8 @@ unsafe extern "C" fn plugin_capacity(
         if answer.is_null() || !carries(unsafe { (*answer).size }, CAPACITY_FIRST_SHAPE) {
             return;
         }
-        let Some((host, plugin_context)) = side_of(data).context_of(context) else {
+        let side = side_of(data);
+        let Some((host, plugin_context)) = side.context_of(context) else {
             return;
         };
         let Some(answering) = locked(&host.kept).answerers.get(&answerer).cloned() else {
@@ -863,16 +873,19 @@ unsafe extern "C" fn plugin_capacity(
         // SAFETY: the constraints are lent for the call.
         let constraints = unsafe { read_numbers(constraints, count) };
         let mut answered = None;
-        plugin_context.inner.link.call_back(
-            || {
-                answered = Some(match question {
-                    1 => (false, answering.attributes()),
-                    _ => (answering.serves(&constraints), Vec::new()),
-                })
-            },
-            FailureKind::PluginCallback,
-            "a capacity answerer panicked, so its question went unanswered",
-        );
+        let threads = side.threads.clone();
+        threads.within(|| {
+            plugin_context.inner.link.call_back(
+                || {
+                    answered = Some(match question {
+                        1 => (false, answering.attributes()),
+                        _ => (answering.serves(&constraints), Vec::new()),
+                    })
+                },
+                FailureKind::PluginCallback,
+                "a capacity answerer panicked, so its question went unanswered",
+            )
+        });
         let Some((serves, attributes)) = answered else {
             return;
         };
@@ -902,8 +915,9 @@ fn answer_the_host(answer: *const SeamAnswer, call: impl FnOnce() -> Result<Answ
 
 unsafe extern "C" fn plugin_action_names(data: *const c_void, answer: *const SeamAnswer) {
     answer_the_host(answer, || {
+        let side = side_of(data);
         Ok(Answering {
-            texts: side_of(data).entry.actions().names(),
+            texts: side.threads.within(|| side.entry.actions().names()),
             ..Answering::default()
         })
     });
@@ -931,12 +945,14 @@ unsafe extern "C" fn plugin_call(
             ),
         };
         let side = side_of(data);
-        let result = if address == 0 {
-            side.entry.actions().call(&name, arguments.as_ref())
-        } else {
-            side.context_of(context)
-                .and_then(|(host, _)| host.call_method(address, &name, arguments.as_ref()))
-        };
+        let result = side.threads.within(|| {
+            if address == 0 {
+                side.entry.actions().call(&name, arguments.as_ref())
+            } else {
+                side.context_of(context)
+                    .and_then(|(host, _)| host.call_method(address, &name, arguments.as_ref()))
+            }
+        });
         answering_of(result)
     });
 }
@@ -959,6 +975,7 @@ unsafe extern "C" fn plugin_free(data: *const c_void) {
             context.detach();
             host.close();
         }
+        side.threads.join_all();
         drop(side);
     }));
 }

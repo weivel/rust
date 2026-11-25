@@ -589,3 +589,45 @@ fn a_hold_made_through_a_context_is_let_go_of_after_the_host_let_go_of_that_cont
     assert_eq!(registry.hold_count(mapping), 0);
     host.destroy().wait();
 }
+
+static LATE_THREAD_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Finishes its deactivate from a thread of its own, which runs on in the plugin's code after the finish.
+struct FinishesLate;
+
+impl Entry for FinishesLate {
+    fn activate(&self, _: &Context) -> Pending<Finished> {
+        Pending::settled(Ok(()))
+    }
+
+    fn deactivate(&self) -> Option<Pending<Finished>> {
+        let (later, settle) = crate::context::pending();
+        crate::host::plugin_thread(move || {
+            settle.settle(Ok(()));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            LATE_THREAD_ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect("the thread starts");
+        Some(later)
+    }
+}
+
+#[test]
+fn an_entrys_free_returns_only_after_the_thread_that_finished_its_deactivate_has_ended() {
+    let table = seam_entry(|| Arc::new(FinishesLate));
+    // SAFETY: `seam_entry` answers a whole table, freed below by its own `free`.
+    let table = unsafe { std::ptr::read(table) };
+    let completion = SeamCompletion {
+        size: size_of::<SeamCompletion>() as u32,
+        data: 0,
+        finish: record_finish,
+    };
+    // SAFETY: the completion lives for the call.
+    assert_eq!(unsafe { (table.deactivate)(table.data, &completion) }, 0);
+    // SAFETY: the table is the one `seam_entry` made, freed once.
+    unsafe { (table.free)(table.data) };
+    assert!(
+        LATE_THREAD_ENDED.load(std::sync::atomic::Ordering::SeqCst),
+        "free returned while the plugin's own thread still ran its code"
+    );
+}
