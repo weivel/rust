@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use weivel_rust::conformance::{
-    HOST_VECTOR_ENTRY_SYMBOL, PLUGIN_WORDS_DIRECTORY, run_pointer_file,
+    HOST_VECTOR_ENTRY_SYMBOL, PLUGIN_WORDS_DIRECTORY, point_runs_at, run_pointer_file,
 };
 use weivel_rust::host::{Tree, methods_of};
 use weivel_rust::program::{FAILED_RUN_EXIT, RunHostOptions, start_host};
@@ -154,10 +154,7 @@ fn a_running_host_answers_the_service_its_plugin_registered_until_it_stops() {
         ),
     );
     let standard = support::shared_library("weivel_standard");
-    write(
-        &run_pointer_file(),
-        &format!("{}\n{}\n", standard.display(), directory.display()),
-    );
+    let _pointer = point_runs_at(&standard, &directory).expect("the run is pointed at");
     let mut options = RunHostOptions::new(
         support::stub_host_library(),
         support::shared_library("weivel_core"),
@@ -180,4 +177,40 @@ fn a_running_host_answers_the_service_its_plugin_registered_until_it_stops() {
     assert_eq!(running.stop().wait(), 6);
     assert!(running.service("alpha", "alpha:accounts").is_none());
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_run_pointer_waits_for_the_run_before_it_and_is_removed_with_it() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let standard = support::shared_library("weivel_standard");
+    let first = point_runs_at(&standard, Path::new("first")).expect("the first run is pointed at");
+    assert!(run_pointer_file().is_file());
+    let second_pointed = std::sync::Arc::new(AtomicBool::new(false));
+    let pointed = second_pointed.clone();
+    let second = std::thread::spawn(move || {
+        let pointer = point_runs_at(
+            &support::shared_library("weivel_standard"),
+            Path::new("second"),
+        )
+        .expect("the second run is pointed at");
+        pointed.store(true, Ordering::SeqCst);
+        let read = std::fs::read_to_string(run_pointer_file()).unwrap_or_default();
+        drop(pointer);
+        read
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        !second_pointed.load(Ordering::SeqCst),
+        "the second run was pointed at while the first stood"
+    );
+    drop(first);
+    let read = second.join().expect("the second run ends");
+    assert!(
+        read.ends_with(
+            "second
+"
+        ),
+        "{read:?}"
+    );
+    assert!(!run_pointer_file().exists());
 }

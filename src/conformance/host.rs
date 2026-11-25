@@ -11,7 +11,7 @@ use std::env::consts::DLL_SUFFIX;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use super::shapes::{self, DriverFailure, Members};
@@ -71,6 +71,34 @@ pub fn run_pointer_file() -> PathBuf {
         "weivel-rust-host-vector-run-{}",
         std::process::id()
     ))
+}
+
+/// Taken for each run the pointer file names, so no two runs of this process lay one out at once.
+static ONE_POINTED_RUN_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// The pointer file written for one run, which no other run of this process may take until it is dropped, when the
+/// file is removed.
+pub struct RunPointer {
+    _turn: MutexGuard<'static, ()>,
+}
+
+impl Drop for RunPointer {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(run_pointer_file());
+    }
+}
+
+/// Points this process's test plugins at the run in `directory` over the standard at `standard`, waiting for any run
+/// pointed at before to end.
+pub fn point_runs_at(standard: &Path, directory: &Path) -> Result<RunPointer, DriverFailure> {
+    let turn = ONE_POINTED_RUN_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_file(
+        &run_pointer_file(),
+        &format!("{}\n{}\n", standard.display(), directory.display()),
+    )?;
+    Ok(RunPointer { _turn: turn })
 }
 
 /// A log that keeps nothing: a vector judges the record, and what the program logs on the way is not part of it.
@@ -473,10 +501,7 @@ fn run_in(
     stop_after: Option<&str>,
     fixtures: &HostProgramFixtures,
 ) -> Result<u32, DriverFailure> {
-    write_file(
-        &run_pointer_file(),
-        &format!("{}\n{}\n", fixtures.standard.display(), directory.display()),
-    )?;
+    let _pointer = point_runs_at(&fixtures.standard, directory)?;
     let mut options = RunHostOptions::new(&fixtures.stub_host, &fixtures.core, &fixtures.standard);
     options.arguments = std::iter::once(directory.to_string_lossy().into_owned())
         .chain(arguments)
