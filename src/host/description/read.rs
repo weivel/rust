@@ -5,7 +5,6 @@
 
 use std::collections::BTreeSet;
 use std::mem::offset_of;
-use std::sync::Arc;
 
 use super::abi::{
     self, DEPTH_LIMIT, KIND_ARRAY, KIND_BYTES, KIND_DEFINITION, KIND_HANDLE, KIND_POINTER,
@@ -33,7 +32,7 @@ pub(crate) struct Reader<'a> {
 
 /// Where a part read goes in its parent: a struct's member, or an item of an array, a list or a record.
 enum Key {
-    Member(Arc<str>),
+    Member(u32),
     Item(usize),
 }
 
@@ -185,15 +184,18 @@ fn an_answer() -> String {
     "an answer".to_owned()
 }
 
-/// A struct's members, with room for every member `laid_out` shows.
+/// A struct's members, with room for every member `laid_out` shows, named from its table.
 fn members_of(laid_out: &LaidOut) -> Value {
-    Value::Struct(Members::with_capacity(laid_out.visible.len()))
+    Value::Struct(Members::named_from(
+        laid_out.names.clone(),
+        laid_out.visible.len(),
+    ))
 }
 
 /// Puts `child` where `key` names in `parent`.
 fn place(parent: &mut Value, key: Key, child: Value) {
     match (parent, key, child) {
-        (Value::Struct(members), Key::Member(name), child) => members.push(name, child),
+        (Value::Struct(members), Key::Member(index), child) => members.push_named(index, child),
         (Value::Array(items), Key::Item(index), child) => items[index] = child,
         (Value::Tree(Tree::List(items)), Key::Item(index), Value::Tree(tree)) => {
             items[index] = tree;
@@ -226,9 +228,9 @@ impl<'layouts> Walk<'layouts, '_> {
         self.parts.pop().map_or(PLACEHOLDER, |root| root.value)
     }
 
-    fn set_member(&mut self, at: usize, name: &Arc<str>, value: Value) {
+    fn set_member(&mut self, at: usize, position: u32, value: Value) {
         if let Value::Struct(members) = &mut self.parts[at].value {
-            members.push(name.clone(), value);
+            members.push_named(position, value);
         }
     }
 
@@ -247,14 +249,15 @@ impl<'layouts> Walk<'layouts, '_> {
             ));
         }
         let described = &laid_out.described;
-        for visible in &laid_out.visible {
+        for (position, visible) in laid_out.visible.iter().enumerate() {
             let member = &described.members[visible.index];
+            let position = position as u32;
             let count = visible
                 .count_offset
                 // SAFETY: a count is a SIZE member of the same struct.
                 .map_or(0, |offset| unsafe { get::<usize>(address + offset) });
             // SAFETY: as the caller promised.
-            unsafe { self.member(address + member.offset, member, count, depth, at)? };
+            unsafe { self.member(address + member.offset, member, position, count, depth, at)? };
         }
         Ok(())
     }
@@ -267,6 +270,7 @@ impl<'layouts> Walk<'layouts, '_> {
         &mut self,
         address: usize,
         member: &Member,
+        position: u32,
         count: usize,
         depth: usize,
         at: usize,
@@ -274,11 +278,11 @@ impl<'layouts> Walk<'layouts, '_> {
         // SAFETY: as the caller promised.
         unsafe {
             if let Some(scalar) = scalar_at(address, member.kind) {
-                self.set_member(at, &member.name, scalar);
+                self.set_member(at, position, scalar);
                 return Ok(());
             }
             let type_name = member.type_name.as_deref();
-            let key = || Key::Member(member.name.clone());
+            let key = || Key::Member(position);
             let value = match member.kind {
                 KIND_TEXT => Value::Text(text_at(get(address))?),
                 KIND_TEXTS => Value::Texts(texts_at(get(address), count)?),
@@ -324,7 +328,7 @@ impl<'layouts> Walk<'layouts, '_> {
                     }
                 }
             };
-            self.set_member(at, &member.name, value);
+            self.set_member(at, position, value);
         }
         Ok(())
     }
