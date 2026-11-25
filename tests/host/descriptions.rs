@@ -252,3 +252,78 @@ fn a_carried_definition_outlives_the_answers_value_it_was_read_from() {
     assert_eq!(total.value(), Some(&Value::U64(1002)));
     assert!(counter.blocking_operations().is_empty());
 }
+
+/// A node whose `next` reaches `links` nodes below it, each one pointer further down.
+fn chain(links: usize) -> Value {
+    let mut node = Value::Struct(inputs(&[("label", Value::Text(Some("last".to_owned())))]));
+    for _ in 0..links {
+        node = Value::Struct(inputs(&[
+            ("label", Value::Text(Some("link".to_owned()))),
+            ("next", node),
+        ]));
+    }
+    node
+}
+
+/// How many nodes lie below `node` through `next`, and the `depth` the provider gave the deepest.
+fn links_of(node: &Value) -> (usize, u32) {
+    let mut links = 0;
+    let mut current = node;
+    while let Value::Struct(members) = current {
+        match members.get("next") {
+            Some(next) => {
+                links += 1;
+                current = next;
+            }
+            None => {
+                let Some(Value::U32(depth)) = members.get("depth") else {
+                    panic!("the last node carries no depth: {members:?}");
+                };
+                return (links, *depth);
+            }
+        }
+    }
+    panic!("an outline node is not a struct: {current:?}");
+}
+
+/// Runs `test` on a thread with the 2 MB stack a test thread gets, so a walk that recurses too deep overflows here.
+fn on_a_two_megabyte_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(test)
+        .expect("the thread starts")
+        .join()
+        .expect("the walk finished on a 2 MB stack");
+}
+
+#[test]
+fn structs_nested_past_the_limit_are_the_callers_mistake_without_exhausting_the_stack() {
+    let described = Described::loaded();
+    let mirror = described.bound("described-mirror");
+    on_a_two_megabyte_stack(move || {
+        let outlined = mirror.call("outline", &inputs(&[("node", chain(1001))]));
+        assert!(
+            outlined
+                .as_ref()
+                .is_err_and(|error| error.is_callers_mistake()),
+            "{outlined:?}"
+        );
+    });
+}
+
+#[test]
+fn structs_nested_to_the_limit_are_written_and_read_back_on_a_two_megabyte_stack() {
+    let described = Described::loaded();
+    let mirror = described.bound("described-mirror");
+    on_a_two_megabyte_stack(move || {
+        let outlined = mirror.call("outline", &inputs(&[("node", chain(999))]));
+        let Ok(DescribedAnswer::Answered(answers)) = outlined else {
+            panic!("outline answered {outlined:?}");
+        };
+        let Some(Value::Struct(copy)) = answers.value() else {
+            panic!("outline answered {answers:?}");
+        };
+        let root = copy.get("root").expect("the copy holds its root");
+        assert_eq!(links_of(root), (999, 999));
+    });
+}

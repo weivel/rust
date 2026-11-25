@@ -13,10 +13,12 @@ use super::described::{Operation, Parameter};
 use super::holdings::{CarriedScope, DescribedHandle, Holdings, KeptAnswer, KeptBlocks, Mapping};
 use super::invoke::{self, MOST_PARAMETERS, ReleaseCall, Slot};
 use super::layouts::{LayoutRefusal, Layouts};
-use super::memory::{Answering, Arena, Block, Reader, Writer};
+use super::memory::{Arena, Block};
+use super::read::{Answering, Reader};
 use super::value::{
     Answers, CallStatus, DescribedAnswer, DescribedCallError, Inputs, Members, Value,
 };
+use super::write::Writer;
 use crate::core::{STATUS_NONE, STATUS_OK, STATUS_REFUSED};
 
 /// How large a block an answer or a refusal is handed, and the size its leading `size` is set to, if it has one.
@@ -401,14 +403,18 @@ impl OperationPlan {
             .as_ref()
             .zip(blocks.refusal.as_ref())
             .filter(|_| status == STATUS_REFUSED);
-        let (detail, fix) = refused
+        let texts = refused
             .and_then(|((index, _), block)| {
                 let laid_out = target
                     .layouts
                     .laid_out(self.parameters[*index].type_name.as_deref())?;
                 Some(Reader::refusal_texts(laid_out, block.address()))
             })
-            .unwrap_or((None, None));
+            .unwrap_or(Ok((None, None)));
+        let (detail, fix) = match texts {
+            Ok(texts) => texts,
+            Err(fault) => return DescribedCallError::fault(&self.name, fault),
+        };
         DescribedCallError {
             operation: self.name.clone(),
             status: CallStatus::Returned(status),

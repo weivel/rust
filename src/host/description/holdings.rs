@@ -51,10 +51,17 @@ static LAST_LIBRARY: AtomicU64 = AtomicU64::new(0);
 /// Every handle and kept answer one library's definitions answered that nobody has released yet, so the unload
 /// releases each of them while the binary is still mapped. What was got through a carried definition is held by a
 /// child, which the end of that definition's answer releases; every child shares its library's identity, so a handle
-/// any of them answered is taken back by every definition of the library.
+/// any of them answered is taken back by every definition of the library. Released once, the holdings are shut: what
+/// a call still running then answers is released as it is held.
 pub(crate) struct Holdings {
     library: u64,
-    live: Mutex<Vec<Weak<dyn Held>>>,
+    live: Mutex<HeldSet>,
+}
+
+#[derive(Default)]
+struct HeldSet {
+    held: Vec<Weak<dyn Held>>,
+    shut: bool,
 }
 
 impl Holdings {
@@ -62,7 +69,7 @@ impl Holdings {
     pub(crate) fn of_a_library() -> Arc<Holdings> {
         Arc::new(Holdings {
             library: LAST_LIBRARY.fetch_add(1, Ordering::Relaxed) + 1,
-            live: Mutex::new(Vec::new()),
+            live: Mutex::new(HeldSet::default()),
         })
     }
 
@@ -70,7 +77,7 @@ impl Holdings {
     pub(crate) fn child(&self) -> Arc<Holdings> {
         Arc::new(Holdings {
             library: self.library,
-            live: Mutex::new(Vec::new()),
+            live: Mutex::new(HeldSet::default()),
         })
     }
 
@@ -78,15 +85,26 @@ impl Holdings {
         self.library
     }
 
-    pub(crate) fn hold(&self, held: Weak<dyn Held>) {
-        let mut live = locked(&self.live);
-        live.retain(|kept| kept.strong_count() > 0);
-        live.push(held);
+    /// Holds `held` until the holdings are released, or releases it at once when they have been.
+    pub(crate) fn hold(&self, held: &Arc<dyn Held>) {
+        {
+            let mut live = locked(&self.live);
+            if !live.shut {
+                live.held.retain(|kept| kept.strong_count() > 0);
+                live.held.push(Arc::downgrade(held));
+                return;
+            }
+        }
+        held.release();
     }
 
-    /// Releases everything still held, in the order it was answered.
+    /// Shuts the holdings and releases everything still held, in the order it was answered.
     pub(crate) fn release_all(&self) {
-        let held = std::mem::take(&mut *locked(&self.live));
+        let held = {
+            let mut live = locked(&self.live);
+            live.shut = true;
+            std::mem::take(&mut live.held)
+        };
         for kept in held {
             if let Some(kept) = kept.upgrade() {
                 kept.release();
@@ -101,16 +119,59 @@ struct HandleInner {
     library: u64,
     release: ReleaseCall,
     mapping: Mapping,
-    live: AtomicBool,
+    state: Mutex<HandleState>,
+}
+
+/// Whether a handle was released, and how many calls use it now: the last one out frees a released handle.
+#[derive(Default)]
+struct HandleState {
+    released: bool,
+    users: usize,
+    freed: bool,
+}
+
+impl HandleInner {
+    /// Whether the handle is to be freed now: released, used by no call, and not freed before.
+    fn is_due(state: &mut HandleState) -> bool {
+        let due = state.released && state.users == 0 && !state.freed;
+        state.freed |= due;
+        due
+    }
+
+    fn free(&self) {
+        if let Some(_mapped) = self.mapping.hold() {
+            self.release.free(self.pointer);
+        }
+    }
 }
 
 impl Held for HandleInner {
     fn release(&self) {
-        if !self.live.swap(false, Ordering::AcqRel) {
-            return;
+        let due = {
+            let mut state = locked(&self.state);
+            state.released = true;
+            HandleInner::is_due(&mut state)
+        };
+        if due {
+            self.free();
         }
-        if let Some(_mapped) = self.mapping.hold() {
-            self.release.free(self.pointer);
+    }
+}
+
+/// A call's use of a handle it was handed: the handle is not freed while it lives, whoever releases it meanwhile.
+pub(crate) struct HandleUse {
+    inner: Arc<HandleInner>,
+}
+
+impl Drop for HandleUse {
+    fn drop(&mut self) {
+        let due = {
+            let mut state = locked(&self.inner.state);
+            state.users -= 1;
+            HandleInner::is_due(&mut state)
+        };
+        if due {
+            self.inner.free();
         }
     }
 }
@@ -161,21 +222,22 @@ impl DescribedHandle {
             library: holdings.library(),
             release,
             mapping,
-            live: AtomicBool::new(true),
+            state: Mutex::new(HandleState::default()),
         });
         let held: Arc<dyn Held> = inner.clone();
-        holdings.hold(Arc::downgrade(&held));
+        holdings.hold(&held);
         DescribedHandle { inner }
     }
 
-    /// Frees the handle; a later call, one after the unload, or the drop of a clone afterwards does nothing.
+    /// Releases the handle, which is freed once no call is using it; a later call, one after the unload, or the drop
+    /// of a clone afterwards does nothing.
     pub fn release(&self) {
         Held::release(&*self.inner);
     }
 
     /// Whether it has not been released.
     pub fn is_live(&self) -> bool {
-        self.inner.live.load(Ordering::Acquire)
+        !locked(&self.inner.state).released
     }
 
     /// The opaque type it is, as its description names it.
@@ -183,8 +245,13 @@ impl DescribedHandle {
         &self.inner.type_name
     }
 
-    /// The pointer it stands for, to hand an operation of `library` taking a `type_name`.
-    pub(crate) fn pointer_for(&self, library: u64, type_name: &str) -> Result<usize, String> {
+    /// The pointer it stands for, to hand an operation of `library` taking a `type_name`, and the use that keeps it
+    /// from being freed until the call has returned.
+    pub(crate) fn use_for(
+        &self,
+        library: u64,
+        type_name: &str,
+    ) -> Result<(usize, HandleUse), String> {
         if self.inner.library != library {
             return Err("it takes a handle this library answered".to_owned());
         }
@@ -194,10 +261,15 @@ impl DescribedHandle {
                 self.inner.type_name
             ));
         }
-        if !self.is_live() {
+        let mut state = locked(&self.inner.state);
+        if state.released {
             return Err("it was handed a handle that has been released".to_owned());
         }
-        Ok(self.inner.pointer)
+        state.users += 1;
+        let using = HandleUse {
+            inner: self.inner.clone(),
+        };
+        Ok((self.inner.pointer, using))
     }
 }
 
@@ -327,7 +399,7 @@ impl KeptAnswer {
             blocks: Mutex::new(Some(blocks)),
         });
         let held: Arc<dyn Held> = kept.clone();
-        holdings.hold(Arc::downgrade(&held));
+        holdings.hold(&held);
         kept
     }
 
@@ -371,5 +443,57 @@ impl Held for KeptAnswer {
 impl Drop for KeptAnswer {
     fn drop(&mut self) {
         Held::release(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::c_void;
+
+    static FREED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+    extern "C" fn record_free(_context: *mut c_void, pointer: *mut c_void) {
+        locked(&FREED).push(pointer as usize);
+    }
+
+    fn times_freed(pointer: usize) -> usize {
+        locked(&FREED)
+            .iter()
+            .filter(|freed| **freed == pointer)
+            .count()
+    }
+
+    fn handle(holdings: &Holdings, pointer: usize) -> DescribedHandle {
+        let release = ReleaseCall::new(record_free as *const () as usize, 0);
+        DescribedHandle::hold(holdings, pointer, "cursor", release, Mapping::Unowned)
+    }
+
+    #[test]
+    fn a_handle_released_while_a_call_uses_it_is_freed_once_the_call_lets_go() {
+        let holdings = Holdings::of_a_library();
+        let handle = handle(&holdings, 0x1001);
+        let (_, using) = handle
+            .use_for(holdings.library(), "cursor")
+            .expect("a live handle is used");
+        handle.release();
+        holdings.release_all();
+        assert_eq!(times_freed(0x1001), 0);
+        assert!(!handle.is_live());
+        drop(using);
+        assert_eq!(times_freed(0x1001), 1);
+        handle.release();
+        drop(handle);
+        assert_eq!(times_freed(0x1001), 1);
+    }
+
+    #[test]
+    fn a_handle_held_after_the_holdings_were_released_is_released_at_once() {
+        let holdings = Holdings::of_a_library();
+        holdings.release_all();
+        let handle = handle(&holdings, 0x2002);
+        assert!(!handle.is_live());
+        assert_eq!(times_freed(0x2002), 1);
+        assert!(handle.use_for(holdings.library(), "cursor").is_err());
     }
 }

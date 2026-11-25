@@ -211,7 +211,7 @@ impl BoundDefinition {
             holdings: Holdings::of_a_library(),
             scope: None,
         };
-        Binding::new(read)
+        read.and_then(Binding::new)
             .and_then(|binding| binding.bind(definition as usize, environment))
             .map_err(Answer::Mistake)
     }
@@ -360,7 +360,7 @@ pub(crate) fn bind_described(
     holdings: Arc<Holdings>,
 ) -> Result<BoundDefinition, String> {
     // SAFETY: as the caller promised: the check passed the description, and the library is open.
-    let read = unsafe { reader::read(described.description_address()) };
+    let read = unsafe { reader::read(described.description_address()) }?;
     let environment = Environment {
         mapping,
         holdings,
