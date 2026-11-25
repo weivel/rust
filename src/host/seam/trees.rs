@@ -19,14 +19,20 @@ const TEXT: u8 = 4;
 const LIST: u8 = 5;
 const RECORD: u8 = 6;
 
-/// The deepest a tree read from the other side may nest, so a hostile or broken encoding cannot overflow the stack.
-const DEPTH_LIMIT: usize = 1000;
+/// The deepest a tree crossing the seam may nest, the root its first level: the standard's JSON reader's own limit, so
+/// every tree a document holds crosses, and so a hostile or broken one never overflows a thread's stack, its encoding,
+/// its decoding and its drop each recursing once per level.
+pub(super) const DEPTH_LIMIT: usize = 256;
 
-/// `tree` in the seam's encoding.
-pub(super) fn encode(tree: &Tree) -> Vec<u8> {
+fn too_deep() -> String {
+    format!("a value tree crossing the seam nests deeper than {DEPTH_LIMIT} levels")
+}
+
+/// `tree` in the seam's encoding, refusing one nested deeper than the limit.
+pub(super) fn encode(tree: &Tree) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    encode_into(tree, &mut bytes);
-    bytes
+    encode_into(tree, &mut bytes, 1)?;
+    Ok(bytes)
 }
 
 fn encode_length(length: usize, bytes: &mut Vec<u8>) {
@@ -38,7 +44,10 @@ fn encode_text(text: &str, bytes: &mut Vec<u8>) {
     bytes.extend_from_slice(text.as_bytes());
 }
 
-fn encode_into(tree: &Tree, bytes: &mut Vec<u8>) {
+fn encode_into(tree: &Tree, bytes: &mut Vec<u8>, depth: usize) -> Result<(), String> {
+    if depth > DEPTH_LIMIT {
+        return Err(too_deep());
+    }
     match tree {
         Tree::Null => bytes.push(NULL),
         Tree::Boolean(false) => bytes.push(FALSE),
@@ -54,23 +63,26 @@ fn encode_into(tree: &Tree, bytes: &mut Vec<u8>) {
         Tree::List(items) => {
             bytes.push(LIST);
             encode_length(items.len(), bytes);
-            items.iter().for_each(|item| encode_into(item, bytes));
+            for item in items {
+                encode_into(item, bytes, depth + 1)?;
+            }
         }
         Tree::Record(entries) => {
             bytes.push(RECORD);
             encode_length(entries.len(), bytes);
             for (key, value) in entries {
                 encode_text(key, bytes);
-                encode_into(value, bytes);
+                encode_into(value, bytes, depth + 1)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Reads one tree in the seam's encoding, refusing bytes that do not hold exactly one.
 pub(super) fn decode(bytes: &[u8]) -> Result<Tree, String> {
     let mut reading = Reading { bytes, at: 0 };
-    let tree = reading.tree(0)?;
+    let tree = reading.tree(1)?;
     if reading.at != bytes.len() {
         return Err("a value tree crossed the seam with bytes after it".to_owned());
     }
@@ -117,9 +129,7 @@ impl Reading<'_> {
 
     fn tree(&mut self, depth: usize) -> Result<Tree, String> {
         if depth > DEPTH_LIMIT {
-            return Err(format!(
-                "a value tree crossed the seam nested deeper than {DEPTH_LIMIT} levels"
-            ));
+            return Err(too_deep());
         }
         let tag = self.take(1)?[0];
         match tag {
@@ -156,11 +166,18 @@ pub(super) fn answering_of(result: Option<MethodResult>) -> Result<Answering, An
             number: ANSWERED_NOTHING,
             ..Answering::default()
         }),
-        Ok(Some(tree)) => Ok(Answering {
-            number: ANSWERED_A_TREE,
-            bytes: encode(&tree),
-            ..Answering::default()
-        }),
+        Ok(Some(tree)) => match encode(&tree) {
+            Ok(bytes) => Ok(Answering {
+                number: ANSWERED_A_TREE,
+                bytes,
+                ..Answering::default()
+            }),
+            Err(failure) => Ok(Answering {
+                number: FAILED,
+                texts: vec![format!("the method answered what cannot cross: {failure}")],
+                ..Answering::default()
+            }),
+        },
         Err(failure) => Ok(Answering {
             number: FAILED,
             texts: vec![failure],
@@ -197,15 +214,51 @@ mod tests {
                 Tree::List(vec![Tree::Null, Tree::Number(-2.5), Tree::Boolean(false)]),
             ),
         ]);
-        assert_eq!(decode(&encode(&tree)), Ok(tree));
+        assert_eq!(decode(&encode(&tree).unwrap()), Ok(tree));
     }
 
     #[test]
     fn bytes_cut_short_or_past_one_tree_are_refused() {
-        let bytes = encode(&Tree::Text("long enough".to_owned()));
+        let bytes = encode(&Tree::Text("long enough".to_owned())).unwrap();
         assert!(decode(&bytes[..bytes.len() - 1]).is_err());
         let mut longer = bytes.clone();
         longer.push(NULL);
         assert!(decode(&longer).is_err());
+    }
+
+    fn nested(levels: usize) -> Tree {
+        (1..levels).fold(Tree::Null, |inner, _| Tree::List(vec![inner]))
+    }
+
+    /// The bytes of `levels` nested lists, written by hand, so a depth past the limit can be handed to the decoder.
+    fn nested_bytes(levels: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for _ in 1..levels {
+            bytes.push(LIST);
+            bytes.extend_from_slice(&1_u64.to_le_bytes());
+        }
+        bytes.push(NULL);
+        bytes
+    }
+
+    #[test]
+    fn a_tree_at_the_limit_crosses_on_a_two_megabyte_thread_and_one_past_it_is_refused() {
+        let crossed = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let tree = nested(DEPTH_LIMIT);
+                let bytes = encode(&tree).expect("a tree at the limit encodes");
+                let read = decode(&bytes).expect("a tree at the limit decodes");
+                let same = read == tree;
+                drop((tree, read));
+                let refused_encode = encode(&nested(DEPTH_LIMIT + 1)).is_err();
+                let refused_decode = decode(&nested_bytes(DEPTH_LIMIT + 1)).is_err();
+                let deep_refused = decode(&nested_bytes(100_000)).is_err();
+                (same, refused_encode, refused_decode, deep_refused)
+            })
+            .expect("the thread starts")
+            .join()
+            .expect("nothing overflows the thread's stack");
+        assert_eq!(crossed, (true, true, true, true));
     }
 }

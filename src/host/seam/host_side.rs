@@ -343,7 +343,7 @@ impl EntryHandle {
                 "the plugin's entry table carries no calls of methods, so {name} cannot be called"
             ));
         };
-        let bytes = arguments.map(encode).unwrap_or_default();
+        let bytes = arguments.map(encode).transpose()?.unwrap_or_default();
         // SAFETY: the name, the bytes and the answer live for the call; the plugin's side catches every panic.
         let answered = answered_by(|answer| unsafe {
             call(
