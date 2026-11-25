@@ -23,3 +23,5 @@ pub mod program;
 pub mod conformance;
 
 pub mod benchmarks;
+
+pub mod testing;

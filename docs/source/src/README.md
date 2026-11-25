@@ -10,5 +10,6 @@ The library, one folder per module of the contract, under the contract's names, 
 - [lib.rs](../../../src/lib.rs) - the crate root, declaring each module
 - [program/](program/) - the `program` module: the host program, `start_host`, `run_host` and the `weivel-host` command line
 - [standard/](standard/) - the `standard` module: the standard's binary by path, its manifests, declarations, JSON reader and description checks, and typed access to its services
+- [testing/](testing/) - the `testing` module: a scratch home, variables set and put back, a described library bound from its folder, and a free port
 - [timer/](timer/) - the `timer` module: the scheduler, the system scheduler and the core's timer
 <!-- end generated -->
