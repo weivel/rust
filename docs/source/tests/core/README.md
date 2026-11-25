@@ -6,5 +6,5 @@ The `core` module's tests, against the real core's binary and the core's and the
 - [load.rs](../../../../tests/core/load.rs) - the loader against the real core, a library that lacks a function, and paths that name no library
 - [main.rs](../../../../tests/core/main.rs) - the test target, declaring each test file
 - [table.rs](../../../../tests/core/table.rs) - the table held to the functions the pinned core's header declares, in order
-- [wrapper.rs](../../../../tests/core/wrapper.rs) - the wrapper's rules: refusals, dispatch order, deferred steps, the sink, destroy, the deadline hooks and calls from several threads
+- [wrapper.rs](../../../../tests/core/wrapper.rs) - the wrapper's rules a caller reaches: refusals, dispatch order, listeners, the sink and calls from several threads
 <!-- end generated -->

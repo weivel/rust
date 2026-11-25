@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::fmt;
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -18,7 +19,7 @@ use super::values::{CoreOptions, Refusal};
 pub type Listener = Arc<dyn Fn(&Core, &Event) + Send + Sync>;
 
 /// A step run on the dispatch queue, after every event drained before it.
-pub type Step = Box<dyn FnOnce(&Core) + Send>;
+pub(crate) type Step = Box<dyn FnOnce(&Core) + Send>;
 
 /// What kind of failure the error sink is told of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +62,12 @@ struct StandardErrorSink;
 
 impl ErrorSink for StandardErrorSink {
     fn report(&self, failure: &Failure) {
-        eprintln!("weivel: {} (failure kind {:?})", failure.text, failure.kind);
+        let _ = writeln!(
+            std::io::stderr(),
+            "weivel: {} (failure kind {:?})",
+            failure.text,
+            failure.kind
+        );
     }
 }
 
@@ -69,11 +75,11 @@ impl ErrorSink for StandardErrorSink {
 /// so a deadline that has fallen due reaches the core first, and `follow` is told each announcement once the lock is
 /// let go, before any event of the call that drained it is dispatched.
 #[derive(Clone)]
-pub struct DeadlineHooks {
+pub(crate) struct DeadlineHooks {
     /// The caller's time now, in its own milliseconds.
-    pub now: Arc<dyn Fn() -> i64 + Send + Sync>,
+    pub(crate) now: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// Hears the latest deadline, `None` when nothing waits on time.
-    pub follow: Arc<dyn Fn(Option<i64>) + Send + Sync>,
+    pub(crate) follow: Arc<dyn Fn(Option<i64>) + Send + Sync>,
 }
 
 /// What a core is wrapped with besides the core's own options.
@@ -91,7 +97,7 @@ pub struct ListenerRegistration(u64);
 
 /// The deadline hooks' place in a core, to remove them by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HooksRegistration(u64);
+pub(crate) struct HooksRegistration(u64);
 
 /// Whether a call hands the core only what the crate built, so a malformed answer is the crate's defect, or carries
 /// something its caller built, so a malformed answer is the caller's.
@@ -325,7 +331,8 @@ impl Core {
     pub(crate) fn report(&self, told: &Failure) {
         let sink = &self.shared.sink;
         if let Err(payload) = catch_unwind(AssertUnwindSafe(|| sink.report(told))) {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "weivel: the error sink panicked ({}) and so was not told: {}",
                 panic_text(&*payload),
                 told.text
@@ -473,7 +480,8 @@ impl Core {
     }
 
     /// Tells `follow` the latest announcement outside the lock, again for as long as a newer one was drained
-    /// meanwhile; only the thread holding the turn is here, so two calls of `follow` never overlap.
+    /// meanwhile; only the thread holding the turn is here, so two calls of `follow` never overlap. Each turn's hook
+    /// is dropped before the lock is taken again, since its last drop may run code that calls in.
     fn follow_the_deadline<'a>(
         &'a self,
         mut state: Guard<'a>,
@@ -481,8 +489,12 @@ impl Core {
     ) -> Guard<'a> {
         loop {
             drop(state);
-            let follow = &turn.follow;
-            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| follow(turn.deadline))) {
+            let FollowingTurn {
+                follow,
+                deadline,
+                serial,
+            } = turn;
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| follow(deadline))) {
                 self.report(&failure(
                     FailureKind::DeadlineHook,
                     format!(
@@ -492,8 +504,9 @@ impl Core {
                     None,
                 ));
             }
+            drop(follow);
             state = self.lock();
-            state.followed_serial = turn.serial;
+            state.followed_serial = serial;
             state.following = false;
             match state.take_following_turn() {
                 Some(next) => turn = next,
@@ -560,6 +573,7 @@ impl Core {
 
     /// Hands the core a deadline that has fallen due: the clock read outside the lock while a deadline is announced,
     /// and when it has reached the deadline an advance drained and dispatched as any call, before the call asked for.
+    /// The clock is dropped before the lock is taken again, since its last drop may run code that calls in.
     fn hand_over_a_due_deadline<'a>(&'a self, state: Guard<'a>) -> Result<Guard<'a>, Answer> {
         let now = match (&state.hooks, state.deadline) {
             (Some(installed), Some(_)) => installed.hooks.now.clone(),
@@ -567,6 +581,7 @@ impl Core {
         };
         drop(state);
         let read = catch_unwind(AssertUnwindSafe(|| now()));
+        drop(now);
         let mut state = self.enter()?;
         let now = match read {
             Ok(now) => now,
@@ -630,7 +645,8 @@ impl Core {
 
     /// Puts a step at the end of the dispatch queue, after every event drained before it, run by the thread that
     /// dispatches.
-    pub fn defer(&self, step: impl FnOnce(&Core) + Send + 'static) -> Result<(), Answer> {
+    #[allow(dead_code, reason = "the timer and the host modules build on it")]
+    pub(crate) fn defer(&self, step: impl FnOnce(&Core) + Send + 'static) -> Result<(), Answer> {
         let mut state = self.enter()?;
         state.queue.push_back(Queued::Step(Box::new(step)));
         self.leave(state, Vec::new());
@@ -639,7 +655,8 @@ impl Core {
 
     /// Installs the deadline hooks, which `follow` hears the latest announcement through at once. A core holds one
     /// set; installing a second is the caller's mistake.
-    pub fn install_deadline_hooks(
+    #[allow(dead_code, reason = "the timer and the host modules build on it")]
+    pub(crate) fn install_deadline_hooks(
         &self,
         hooks: DeadlineHooks,
     ) -> Result<HooksRegistration, Answer> {
@@ -661,7 +678,11 @@ impl Core {
     }
 
     /// Removes the deadline hooks `registration` names; answers [`Answer::Absent`] when they are not the ones installed.
-    pub fn remove_deadline_hooks(&self, registration: HooksRegistration) -> Result<(), Answer> {
+    #[allow(dead_code, reason = "the timer and the host modules build on it")]
+    pub(crate) fn remove_deadline_hooks(
+        &self,
+        registration: HooksRegistration,
+    ) -> Result<(), Answer> {
         let mut state = self.enter()?;
         if state.hooks.as_ref().map(|installed| installed.registration) != Some(registration.0) {
             return Err(Answer::Absent);
@@ -693,9 +714,19 @@ impl Core {
         self.lock().core.is_none()
     }
 
-    /// How many events this core's wrapper has drained.
+    /// How many events this core's wrapper has drained, an event of a kind the crate does not know among them,
+    /// which is counted but never heard.
     pub fn last_sequence(&self) -> u64 {
         self.lock().sequence
+    }
+
+    /// Whether the layer lock is held now, by any thread.
+    #[cfg(test)]
+    pub(crate) fn is_locked(&self) -> bool {
+        matches!(
+            self.shared.state.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 }
 

@@ -8,7 +8,8 @@ use super::values::{Handle, Number, Refusal};
 /// One event, in the order the core queued it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
-    /// Its place among every event this core's wrapper drained, from 1.
+    /// Its place among every event this core's wrapper drained, from 1. An event of a kind the crate does not know is
+    /// drained and counted but never heard, so the sequences a listener hears may skip one.
     pub sequence: u64,
     /// Whether a text the core handed out could not be read, and so carries a fixed sentence in its place. Every
     /// handle, code and number of an incomplete event is still exact.

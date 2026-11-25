@@ -126,13 +126,12 @@ pub(crate) unsafe fn slice<'a, T>(items: *const T, count: u32) -> &'a [T] {
 /// its zero default.
 ///
 /// # Safety
-/// `items` holds `count` elements of the stride the first declares, or is NULL with a count of 0, and `T` is a plain
-/// struct of integers and raw pointers beginning with its size.
-pub(crate) unsafe fn strided<T: Copy>(items: *const T, count: u32) -> Vec<T> {
+/// `items` holds `count` elements of the stride the first declares, or is NULL with a count of 0.
+pub(crate) unsafe fn strided<T: abi::SizePrefixed>(items: *const T, count: u32) -> Vec<T> {
     if items.is_null() || count == 0 {
         return Vec::new();
     }
-    // SAFETY: the first element begins with its size, as the caller promises.
+    // SAFETY: the array is not empty, as the caller promises, and `T` begins with its size.
     let stride = unsafe { items.cast::<u32>().read_unaligned() } as usize;
     let known = stride.min(std::mem::size_of::<T>());
     (0..count as usize)
