@@ -39,5 +39,22 @@ library> [arguments...]`, which finds the core's and the standard's shared libra
 ## What a release build should set
 
 A library cannot set its consumer's profile. A program built on the crate is smallest with `opt-level = "s"`, fat LTO,
-one codegen unit and `strip`; `panic = "abort"` would end the process on a listener's panic, which the crate otherwise
-catches and tells its error sink.
+one codegen unit and `strip`, which `Cargo.toml` names the `smallest` profile, `cargo build --profile smallest --bin
+weivel-host`. It is a profile of its own rather than `release`, so the benchmark gates keep timing the build they were
+bounded on. It keeps `panic = "unwind"`: under `panic = "abort"` a listener's panic, which the crate otherwise catches
+and tells its error sink as the contract asks, ends the process. A consumer may still choose abort, for the size
+measured below, at that cost.
+
+## The host program's size and startup
+
+`cargo test --test size` builds `weivel-host` with the `smallest` profile, once with each panic strategy, and an empty
+program, `fn main() {}`, with the same profile, all under `build/size`, then times 21 runs of the host over a plan
+whose one plugin has no manifest, so a run loads the core, the standard and the kit's `stub-host`, starts, refuses the
+plugin, fails the action, stops and destroys the host: every step of a run but a plugin's own. It prints one line per
+panic strategy and judges only that each build succeeds and each run ends with the code the plan names; the Test job
+runs it on every system, so its lines are in that job's log. Measured on 2026-11-25 with Rust 1.100.0:
+
+| system | panic | `weivel-host` stripped | empty program | what the crate adds | empty run, median of 21 | least |
+|---|---|---|---|---|---|---|
+| Windows 11, x86_64, MSVC, local | unwind | 1 111 552 bytes (1085 KiB) | 107 008 bytes | 1 004 544 bytes (981 KiB) | 22.1 ms | 18.5 ms |
+| Windows 11, x86_64, MSVC, local | abort | 690 176 bytes (674 KiB) | 103 936 bytes | 586 240 bytes (573 KiB) | 20.5 ms | 19.9 ms |

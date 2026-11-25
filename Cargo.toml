@@ -22,5 +22,17 @@ name = "benchmarks"
 path = "tests/benchmarks/main.rs"
 harness = false
 
+[[test]]
+name = "size"
+path = "tests/program/size.rs"
+harness = false
+
+[profile.smallest]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [workspace]
 members = ["scripts/native", "tests/plugins"]
