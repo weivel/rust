@@ -561,6 +561,7 @@ impl Kept {
                     .collect::<Result<_, DriverFailure>>()?,
             ),
             Value::Tree(tree) => tree_json(tree),
+            Value::NoValue => Json::Null,
             Value::Handle(handle) => {
                 let name = self.name("a handle")?;
                 self.handle = Some(handle.clone());

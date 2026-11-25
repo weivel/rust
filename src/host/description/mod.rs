@@ -23,7 +23,7 @@ mod value;
 mod write;
 
 pub use definition::BoundDefinition;
-pub(crate) use definition::bind_described;
+pub(crate) use definition::{bind_described, contract_operations};
 pub use holdings::DescribedHandle;
 pub(crate) use holdings::{Holdings, Mapping, RemoteMapping};
 pub(crate) use layouts::Layouts;

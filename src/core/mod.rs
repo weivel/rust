@@ -35,6 +35,7 @@ pub use codes::{
 pub use event::{Event, EventPayload};
 pub(crate) use library::{BytesFunction, LibraryBinary, RefusedClose};
 pub use library::{DescribedDefinition, LibraryBytes};
+pub(crate) use read::manifest_at;
 pub use table::{CoreBinary, LoadFailure};
 pub use values::{
     ActivationPlan, CapabilityImplementation, Capacity, ConstraintEntry, CoreOptions,

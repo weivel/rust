@@ -459,6 +459,8 @@ unsafe impl SizePrefixed for CapabilityList {}
 unsafe impl SizePrefixed for LedgerRow {}
 unsafe impl SizePrefixed for DeclarationRefusal {}
 unsafe impl SizePrefixed for LedgerSnapshot {}
+unsafe impl SizePrefixed for ServiceOffer {}
+unsafe impl SizePrefixed for ServiceWant {}
 
 /// A struct the core fills and frees, zeroed but for its `size`, which the core reads first.
 pub(crate) fn answer_struct<T: SizePrefixed>() -> T {

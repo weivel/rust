@@ -32,6 +32,11 @@ pub fn shared_library(name: &str) -> PathBuf {
     native_file(&format!("{DLL_PREFIX}{name}{DLL_SUFFIX}"))
 }
 
+/// The kit's `stub-host`, which `scripts/native` gathers with its declarations beside it.
+pub fn stub_host_library() -> PathBuf {
+    native_file(&format!("stub-host/{DLL_PREFIX}stub-host{DLL_SUFFIX}"))
+}
+
 /// A program `scripts/native` gathered as `name`.
 pub fn program(name: &str) -> PathBuf {
     native_file(&format!("{name}{EXE_SUFFIX}"))

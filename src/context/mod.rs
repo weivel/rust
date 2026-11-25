@@ -32,3 +32,4 @@ pub use records::{
 };
 pub(crate) use services::Registering;
 pub use services::{ServiceRegistration, Want, WantLimits, Watching};
+pub(crate) use state::OfferedToEach;

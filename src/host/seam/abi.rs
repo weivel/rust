@@ -61,6 +61,9 @@ pub struct SeamAnswered {
     /// Appended: the host's id of the library the definition at `number`, and each of `addresses`, lies in.
     pub(super) mapping: u64,
     pub(super) mappings: *const u64,
+    /// Appended: bytes the call answered, a value tree in the seam's own encoding where a method answered one.
+    pub(super) bytes: *const u8,
+    pub(super) byte_count: usize,
 }
 
 /// Where the callee hands what it answered: `take` is called once, before the call returns, with `data`.
@@ -156,8 +159,12 @@ pub struct SeamContext {
     pub(super) dispatches_here: unsafe extern "C" fn(u64) -> u32,
     /// Appended: holds the library a mapping id names mapped, answering 1, or 0 once it has closed; `unhold` lets go of
     /// one hold.
-    pub(super) hold: unsafe extern "C" fn(u64, u64) -> u32,
-    pub(super) unhold: unsafe extern "C" fn(u64, u64),
+    pub(super) hold: Option<unsafe extern "C" fn(u64, u64) -> u32>,
+    pub(super) unhold: Option<unsafe extern "C" fn(u64, u64)>,
+    /// Appended: tells the host that the plugin's object at the address offers the methods named, before it is
+    /// registered or provided, so the host's object for it calls them back across the seam by name.
+    pub(super) offer_methods:
+        Option<unsafe extern "C" fn(u64, usize, SeamTexts, *const SeamAnswer)>,
 }
 
 /// What the host hands an activate or a deactivate to finish it with: `data` the host's id for it, so a finish after
@@ -214,6 +221,10 @@ pub struct SeamEvent {
 /// first. `activate` and `deactivate` answer 0 once they took the completion, which they then finish at most once;
 /// `deactivate` answers 1, taking nothing, for an entry that offers none. `forget_context` tells the plugin the host
 /// let go of a context, and `free` that the host is done with the table, after which nothing calls it.
+/// `action_names` answers the names of the entry's actions as texts, and `call` calls one method by name with a value
+/// tree in the seam's encoding: of the entry's actions for address 0, otherwise of the object at the address the
+/// plugin registered or provided through the context the id names. A call answers `number` 0 for nothing, 1 for a
+/// value tree in `bytes`, and 2 for a failure, its text the one of `texts`; a name it does not offer answers absent.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SeamEntry {
@@ -238,7 +249,24 @@ pub struct SeamEntry {
     ),
     pub(super) forget_context: unsafe extern "C" fn(*const c_void, u64),
     pub(super) free: unsafe extern "C" fn(*const c_void),
+    /// Appended.
+    pub(super) action_names: Option<unsafe extern "C" fn(*const c_void, *const SeamAnswer)>,
+    /// Appended.
+    pub(super) call: Option<EntryCall>,
 }
+
+/// The entry table's `call`: its data, the context's id, the object's address, the method's name, the arguments' bytes
+/// and their count, whether arguments were handed at all, and the caller's answer.
+pub(super) type EntryCall = unsafe extern "C" fn(
+    *const c_void,
+    u64,
+    usize,
+    SeamText,
+    *const u8,
+    usize,
+    u32,
+    *const SeamAnswer,
+);
 
 macro_rules! first_shape {
     ($type:ty, $last:ident) => {{
@@ -251,6 +279,8 @@ macro_rules! first_shape {
 
 /// Each table's first shape: the end of the fields it was first published with.
 pub(super) const ENTRY_FIRST_SHAPE: usize = first_shape!(SeamEntry, free);
+pub(super) const ENTRY_CALL_END: usize = first_shape!(SeamEntry, call);
+pub(super) const CONTEXT_OFFER_METHODS_END: usize = first_shape!(SeamContext, offer_methods);
 pub(super) const CONTEXT_FIRST_SHAPE: usize = first_shape!(SeamContext, dispatches_here);
 pub(super) const COMPLETION_FIRST_SHAPE: usize = first_shape!(SeamCompletion, finish);
 pub(super) const EVENT_FIRST_SHAPE: usize = first_shape!(SeamEvent, settlement);
@@ -262,6 +292,53 @@ pub(super) const ANSWERED_FIRST_SHAPE: usize = first_shape!(SeamAnswered, kind);
 pub(super) const MANIFEST_FIRST_SHAPE: usize = first_shape!(SeamManifest, services_consumed_count);
 pub(super) const WANT_LIMITS_FIRST_SHAPE: usize = first_shape!(SeamWantLimits, poll_millis);
 pub(super) const CAPACITY_FIRST_SHAPE: usize = first_shape!(SeamCapacity, take);
+
+/// Copies a table the other side lent, reading no byte past the `size` it leads with: every field it does not reach is
+/// zero, which is `None` for an appended function, since every field past a table's first shape is nullable.
+///
+/// # Safety
+/// `table` points at a table of `T` whose `size` reaches at least its first shape, and every field of `T` past that
+/// first shape is valid as zero.
+pub(super) unsafe fn copy_table<T>(table: *const T) -> T {
+    // SAFETY: as the caller promised, the table begins with its `size`.
+    let size = unsafe { table.cast::<u32>().read_unaligned() } as usize;
+    let mut copied = std::mem::MaybeUninit::<T>::zeroed();
+    // SAFETY: the other side's table spans `size` bytes, and only as many as both know are copied.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            table.cast::<u8>(),
+            copied.as_mut_ptr().cast::<u8>(),
+            size.min(size_of::<T>()),
+        );
+    }
+    // SAFETY: every field up to the first shape was copied, and every field past it is valid as zero.
+    unsafe { copied.assume_init() }
+}
+
+unsafe extern "C" fn take_into_slot(data: *mut c_void, answered: *const SeamAnswered) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: `data` is the caller's slot for the length of the call, and the answer is lent for it.
+        let slot = unsafe { &mut *(data as *mut Option<Result<Answering, Answer>>) };
+        *slot = Some(if answered.is_null() {
+            Err(Answer::Defect("the other side answered nothing".to_owned()))
+        } else {
+            // SAFETY: as above.
+            unsafe { read_answered(&*answered) }
+        });
+    }));
+}
+
+/// Makes one call of the other side, handing it an answer, and answers what it handed that answer.
+pub(super) fn answered_by(call: impl FnOnce(*const SeamAnswer)) -> Result<Answering, Answer> {
+    let mut slot: Option<Result<Answering, Answer>> = None;
+    let answer = SeamAnswer {
+        size: size_of_table::<SeamAnswer>(),
+        data: &mut slot as *mut Option<Result<Answering, Answer>> as *mut c_void,
+        take: take_into_slot,
+    };
+    call(&answer);
+    slot.unwrap_or_else(|| Err(Answer::Defect("the other side answered nothing".to_owned())))
+}
 
 /// Whether a table of `size` reaches past a field ending at `end`.
 pub(super) fn carries(size: u32, end: usize) -> bool {
@@ -335,13 +412,13 @@ pub(super) unsafe fn read_numbers(pointer: *const SeamNumber, count: usize) -> V
         .collect()
 }
 
-fn lend_texts(texts: &[String]) -> Vec<SeamText> {
+pub(super) fn lend_texts(texts: &[String]) -> Vec<SeamText> {
     texts.iter().map(|text| SeamText::of(text)).collect()
 }
 
 /// # Safety
 /// The texts are lent for the length of the call.
-unsafe fn read_texts(texts: SeamTexts) -> Vec<String> {
+pub(super) unsafe fn read_texts(texts: SeamTexts) -> Vec<String> {
     // SAFETY: as the caller promised.
     unsafe { lent(texts.texts, texts.count) }
         .iter()
@@ -393,6 +470,7 @@ const DESTROYED: u32 = 3;
 const DEFECT: u32 = 4;
 const MISTAKE: u32 = 5;
 const DETACHED: u32 = 6;
+const CONTRACT_MISMATCH: u32 = 7;
 
 /// What a callee answers across the seam, owned on its side until it is lent to the caller's [`SeamAnswer`].
 #[derive(Default)]
@@ -404,6 +482,7 @@ pub(super) struct Answering {
     pub(super) descriptions: Vec<usize>,
     pub(super) mapping: u64,
     pub(super) mappings: Vec<u64>,
+    pub(super) bytes: Vec<u8>,
 }
 
 /// Lends `answered` to `take` for the length of the call.
@@ -411,10 +490,19 @@ pub(super) fn lend_answered(
     answered: &Result<Answering, Answer>,
     take: impl FnOnce(&SeamAnswered),
 ) {
-    let empty = Answering::default();
+    let failed_with = match answered {
+        Err(Answer::ContractMismatch {
+            capability,
+            operation,
+        }) => Answering {
+            texts: vec![capability.clone(), operation.clone()],
+            ..Answering::default()
+        },
+        _ => Answering::default(),
+    };
     let (value, failure) = match answered {
         Ok(value) => (value, None),
-        Err(failure) => (&empty, Some(failure)),
+        Err(failure) => (&failed_with, Some(failure)),
     };
     let texts = lend_texts(&value.texts);
     let (kind, status, refusal, detail) = match failure {
@@ -434,6 +522,7 @@ pub(super) fn lend_answered(
         Some(Answer::Defect(detail)) => (DEFECT, 0, None, detail.as_str()),
         Some(Answer::Mistake(detail)) => (MISTAKE, 0, None, detail.as_str()),
         Some(Answer::Detached) => (DETACHED, 0, None, ""),
+        Some(Answer::ContractMismatch { .. }) => (CONTRACT_MISMATCH, 0, None, ""),
     };
     take(&SeamAnswered {
         size: size_of_table::<SeamAnswered>(),
@@ -459,6 +548,8 @@ pub(super) fn lend_answered(
         } else {
             std::ptr::null()
         },
+        bytes: value.bytes.as_ptr(),
+        byte_count: value.bytes.len(),
     });
 }
 
@@ -490,6 +581,19 @@ pub(super) unsafe fn read_answered(answered: &SeamAnswered) -> Result<Answering,
     } else {
         0
     };
+    let texts = || {
+        if reaches(first_shape!(SeamAnswered, text_count)) {
+            // SAFETY: as above.
+            unsafe {
+                read_texts(SeamTexts {
+                    texts: answered.texts,
+                    count: answered.text_count,
+                })
+            }
+        } else {
+            Vec::new()
+        }
+    };
     match answered.kind {
         ANSWERED => Ok(Answering {
             number: if reaches(first_shape!(SeamAnswered, number)) {
@@ -497,17 +601,7 @@ pub(super) unsafe fn read_answered(answered: &SeamAnswered) -> Result<Answering,
             } else {
                 0
             },
-            texts: if reaches(first_shape!(SeamAnswered, text_count)) {
-                // SAFETY: as above.
-                unsafe {
-                    read_texts(SeamTexts {
-                        texts: answered.texts,
-                        count: answered.text_count,
-                    })
-                }
-            } else {
-                Vec::new()
-            },
+            texts: texts(),
             addresses: if reaches(first_shape!(SeamAnswered, address_count)) {
                 // SAFETY: as above.
                 unsafe { lent(answered.addresses, answered.address_count) }.to_vec()
@@ -536,6 +630,12 @@ pub(super) unsafe fn read_answered(answered: &SeamAnswered) -> Result<Answering,
             } else {
                 Vec::new()
             },
+            bytes: if reaches(first_shape!(SeamAnswered, byte_count)) {
+                // SAFETY: as above.
+                unsafe { lent(answered.bytes, answered.byte_count) }.to_vec()
+            } else {
+                Vec::new()
+            },
         }),
         ABSENT => Err(Answer::Absent),
         REFUSED => Err(Answer::Refused {
@@ -549,6 +649,13 @@ pub(super) unsafe fn read_answered(answered: &SeamAnswered) -> Result<Answering,
         DESTROYED => Err(Answer::Destroyed),
         MISTAKE => Err(Answer::Mistake(detail)),
         DETACHED => Err(Answer::Detached),
+        CONTRACT_MISMATCH => {
+            let mut named = texts().into_iter();
+            Err(Answer::ContractMismatch {
+                capability: named.next().unwrap_or_default(),
+                operation: named.next().unwrap_or_default(),
+            })
+        }
         _ => Err(Answer::Defect(detail)),
     }
 }

@@ -4,7 +4,7 @@ use std::ffi::{CStr, c_char};
 
 use super::abi;
 use super::codes::RefusalCode;
-use super::values::{Handle, Number, Refusal};
+use super::values::{Handle, Manifest, Number, Refusal, ServiceOffer, ServiceWant};
 
 /// The text an event carries in place of one the core handed out that is not UTF-8.
 pub(crate) const UNREADABLE_TEXT: &str =
@@ -145,4 +145,59 @@ pub(crate) unsafe fn strided<T: abi::SizePrefixed>(items: *const T, count: u32) 
             element
         })
         .collect()
+}
+
+fn choice_of(choice: u32) -> Option<bool> {
+    match choice {
+        abi::CHOICE_NO => Some(false),
+        abi::CHOICE_YES => Some(true),
+        _ => None,
+    }
+}
+
+/// Reads the core's `weivel_manifest` at `manifest` into the crate's [`Manifest`], as a reader of manifests other than
+/// the crate's own, the standard's among them, hands it one.
+///
+/// # Safety
+/// `manifest` is a `weivel_manifest` of the core's layout whose texts and lists live for the call.
+pub(crate) unsafe fn manifest_at(manifest: *const std::ffi::c_void) -> Manifest {
+    let mut reader = Reader::default();
+    // SAFETY: as the caller promises.
+    let manifest = unsafe { &*(manifest as *const abi::Manifest) };
+    // SAFETY: as the caller promises, for every text and list the manifest points at.
+    unsafe {
+        Manifest {
+            import_name: reader.text(manifest.import_name),
+            api: manifest.api,
+            entry: reader.optional_text(manifest.entry),
+            targets: reader.strings(manifest.targets),
+            capabilities_provided: reader.strings(manifest.capabilities.provides),
+            capabilities_consumed: reader.strings(manifest.capabilities.consumes),
+            services_provided: strided(
+                manifest.services.provides.items,
+                manifest.services.provides.count,
+            )
+            .into_iter()
+            .map(|offer| ServiceOffer {
+                id: reader.text(offer.id),
+                attributes: reader.numbers(offer.attributes),
+            })
+            .collect(),
+            services_consumed: strided(
+                manifest.services.consumes.items,
+                manifest.services.consumes.count,
+            )
+            .into_iter()
+            .map(|want| ServiceWant {
+                id: reader.text(want.id),
+                provider: reader.optional_text(want.provider),
+                optional: choice_of(want.optional),
+                degradable: choice_of(want.degradable),
+                constraints: reader.numbers(want.constraints),
+            })
+            .collect(),
+            permissions: reader.strings(manifest.permissions),
+            identity: reader.optional_text(manifest.identity),
+        }
+    }
 }

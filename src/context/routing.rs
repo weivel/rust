@@ -2,7 +2,7 @@
 
 use super::plugin::Context;
 use super::records::{Object, PluginEvent, Record, Revocation};
-use super::state::ContextState;
+use super::state::{ContextState, Reached};
 use crate::core::{
     Answer, CapabilityChange, Capacity, CapacityQuestion, Event, EventPayload, FailureKind, Handle,
     Number, RefusalStatus, WatchChange,
@@ -100,12 +100,19 @@ impl ContextState {
             }));
             return;
         }
-        let Some(service) = self.service_of(implementation, event) else {
-            record.settle(Err(Answer::Defect(
-                "the core settled a want with a registration the layer holds no object for"
-                    .to_owned(),
-            )));
-            return;
+        let service = match self.service_of(plugin, implementation, event) {
+            Reached::Object(service) => service,
+            Reached::NotOffered => {
+                record.settle(Err(Answer::Absent));
+                return;
+            }
+            Reached::Unknown => {
+                record.settle(Err(Answer::Defect(
+                    "the core settled a want with a registration the layer holds no object for"
+                        .to_owned(),
+                )));
+                return;
+            }
         };
         if let Some(room) = room {
             room.hold(plugin, implementation, service.clone());
@@ -133,7 +140,7 @@ impl ContextState {
         };
         let text = "a plugin's service watcher panicked";
         if change == WatchChange::REGISTERED {
-            let Some(service) = self.service_of(implementation, event) else {
+            let Reached::Object(service) = self.service_of(plugin, implementation, event) else {
                 return;
             };
             self.hold(plugin, implementation, service.clone());
@@ -306,15 +313,15 @@ impl ContextState {
         }
     }
 
-    fn service_of(&self, registration: Handle, event: &Event) -> Option<Object> {
-        let service = self.object_of_registration(registration);
-        if service.is_none() {
+    fn service_of(&self, plugin: Handle, registration: Handle, event: &Event) -> Reached {
+        let reached = self.reached_by(plugin, registration);
+        if matches!(reached, Reached::Unknown) {
             self.unknown(
                 "the core handed a plugin a registration the layer holds no object for",
                 event,
             );
         }
-        service
+        reached
     }
 
     fn hold(&self, plugin: Handle, implementation: Handle, object: Object) {

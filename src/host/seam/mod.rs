@@ -12,6 +12,8 @@ mod host_side;
 mod plugin_side;
 #[cfg(test)]
 mod tests;
+#[forbid(unsafe_code)]
+mod trees;
 
 use std::sync::{Mutex, MutexGuard};
 

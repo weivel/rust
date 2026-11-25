@@ -1,7 +1,8 @@
 //! Builds the native siblings the tests load, with CMake in Release, and gathers what they built into `build/native`:
 //! the core's shared library and its `echo` test library, the standard's shared library and its `described` test
-//! library, and the core's and the standard's `layouts` programs; then builds the test plugins the suite loads across
-//! the plugin seam with Cargo, and gathers their library there too.
+//! library, the core's and the standard's `layouts` programs, and the kit's `stub-host` with its declarations beside
+//! it in `build/native/stub-host`; then builds the test plugins the suite loads across the plugin seam with Cargo, and
+//! gathers their library there too.
 
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 use std::fs;
@@ -18,9 +19,17 @@ struct BuiltTarget {
 
 /// One sibling's CMake project and what is built of it.
 struct NativeSibling {
-    sibling: &'static str,
+    /// The project's directory, under `siblings/`.
+    project: &'static str,
+    /// The build directory's name under `build/`, kept short since MSBuild's paths below it are long.
+    build_name: &'static str,
     targets: Vec<BuiltTarget>,
-    needs_the_core_source: bool,
+    /// The siblings whose checkouts the project is configured with, each as `-DWEIVEL_<NAME>_SOURCE_DIR`.
+    source_siblings: &'static [&'static str],
+    /// Where under `build/native` what it built is gathered.
+    gathered_under: &'static str,
+    /// Files of the project copied beside what it built.
+    companions: &'static [&'static str],
 }
 
 fn shared_library(target: &'static str, name: &str) -> BuiltTarget {
@@ -43,22 +52,40 @@ fn program(target: &'static str, gathered_as: &str) -> BuiltTarget {
 fn native_siblings() -> Vec<NativeSibling> {
     vec![
         NativeSibling {
-            sibling: "core",
+            project: "core",
+            build_name: "core",
             targets: vec![
                 shared_library("weivel_core_shared", "weivel_core"),
                 shared_library("echo", "echo"),
                 program("layouts", "core-layouts"),
             ],
-            needs_the_core_source: false,
+            source_siblings: &[],
+            gathered_under: "",
+            companions: &[],
         },
         NativeSibling {
-            sibling: "standard",
+            project: "standard",
+            build_name: "standard",
             targets: vec![
                 shared_library("weivel_standard_shared", "weivel_standard"),
                 shared_library("weivel_standard_described", "weivel_standard_described"),
                 program("layouts", "standard-layouts"),
             ],
-            needs_the_core_source: true,
+            source_siblings: &["core"],
+            gathered_under: "",
+            companions: &[],
+        },
+        NativeSibling {
+            project: "conformance/test/stub-host",
+            build_name: "sh",
+            targets: vec![shared_library("stub-host", "stub-host")],
+            source_siblings: &["standard", "core"],
+            gathered_under: "stub-host",
+            companions: &[
+                "library.json",
+                "library-declares-log.json",
+                "library-declares-a-contract.json",
+            ],
         },
     ]
 }
@@ -83,14 +110,15 @@ fn run_cmake(arguments: &[String]) -> Result<(), String> {
     }
 }
 
-fn require_sibling(root: &Path, sibling: &str) -> Result<PathBuf, String> {
-    let directory = root.join("siblings").join(sibling);
+fn require_sibling(root: &Path, project: &str) -> Result<PathBuf, String> {
+    let directory = root.join("siblings").join(project);
     if directory.join("CMakeLists.txt").is_file() {
         return Ok(directory);
     }
+    let sibling = project.split('/').next().unwrap_or(project);
     Err(format!(
-        "siblings/{sibling} is missing. CI checks it out from repo.json; locally, link or clone the {sibling} checkout \
-         there at the commit repo.json pins."
+        "siblings/{project} is missing. CI checks it out from repo.json; locally, link or clone the {sibling} \
+         checkout there at the commit repo.json pins."
     ))
 }
 
@@ -129,10 +157,11 @@ fn configure_arguments(
         path_text(build_directory),
         "-DCMAKE_BUILD_TYPE=Release".to_owned(),
     ];
-    if sibling.needs_the_core_source {
+    for source_sibling in sibling.source_siblings {
         arguments.push(format!(
-            "-DWEIVEL_CORE_SOURCE_DIR={}",
-            path_text(&root.join("siblings").join("core"))
+            "-DWEIVEL_{}_SOURCE_DIR={}",
+            source_sibling.to_uppercase(),
+            path_text(&root.join("siblings").join(source_sibling))
         ));
     }
     arguments
@@ -151,9 +180,22 @@ fn build_arguments(sibling: &NativeSibling, build_directory: &Path) -> Vec<Strin
     arguments
 }
 
+fn copy(from: &Path, to: &Path) -> Result<(), String> {
+    fs::copy(from, to).map(|_| ()).map_err(|error| {
+        format!(
+            "{} could not be copied to {}: {error}",
+            from.display(),
+            to.display()
+        )
+    })
+}
+
 fn build_sibling(root: &Path, sibling: &NativeSibling, gathered: &Path) -> Result<(), String> {
-    let source = require_sibling(root, sibling.sibling)?;
-    let build_directory = root.join("build").join(sibling.sibling);
+    let source = require_sibling(root, sibling.project)?;
+    let build_directory = root.join("build").join(sibling.build_name);
+    let gathered = gathered.join(sibling.gathered_under);
+    fs::create_dir_all(&gathered)
+        .map_err(|error| format!("{} could not be made: {error}", gathered.display()))?;
     run_cmake(&configure_arguments(
         root,
         sibling,
@@ -163,14 +205,10 @@ fn build_sibling(root: &Path, sibling: &NativeSibling, gathered: &Path) -> Resul
     run_cmake(&build_arguments(sibling, &build_directory))?;
     for built in &sibling.targets {
         let from = find_built(&build_directory, &built.file_name)?;
-        let to = gathered.join(&built.gathered_name);
-        fs::copy(&from, &to).map_err(|error| {
-            format!(
-                "{} could not be copied to {}: {error}",
-                from.display(),
-                to.display()
-            )
-        })?;
+        copy(&from, &gathered.join(&built.gathered_name))?;
+    }
+    for companion in sibling.companions {
+        copy(&source.join(companion), &gathered.join(companion))?;
     }
     Ok(())
 }
@@ -198,14 +236,7 @@ fn build_the_test_plugins(root: &Path, gathered: &Path) -> Result<(), String> {
     }
     let file_name = format!("{DLL_PREFIX}weivel_test_plugins{DLL_SUFFIX}");
     let from = cargo_target_directory(root).join("debug").join(&file_name);
-    let to = gathered.join(&file_name);
-    fs::copy(&from, &to).map(|_| ()).map_err(|error| {
-        format!(
-            "{} could not be copied to {}: {error}",
-            from.display(),
-            to.display()
-        )
-    })
+    copy(&from, &gathered.join(&file_name))
 }
 
 fn build_everything() -> Result<(), String> {

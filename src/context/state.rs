@@ -3,9 +3,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
+use std::collections::BTreeMap;
+
 use super::log::HostLog;
 use super::plugin::ContextInner;
-use super::records::{Record, Releases, Table, WantRecord, WantSettlement};
+use super::records::{Object, Record, Releases, Table, WantRecord, WantSettlement};
 use crate::core::{Answer, Core, Failure, FailureKind, Handle, Hold, panic_text};
 use crate::handles::HandleKind;
 use crate::timer::CoreTimer;
@@ -22,6 +24,25 @@ pub(crate) struct ContextState {
     pub(crate) timer: Arc<CoreTimer>,
     pub(crate) host_log: Arc<dyn HostLog>,
     pub(crate) releases: Releases,
+    /// The operations each published contract asks of an implementation, by its capability id.
+    pub(crate) contracts: Mutex<BTreeMap<String, Vec<String>>>,
+}
+
+/// What a registration's object is to one plugin reaching it.
+pub(crate) enum Reached {
+    /// The object.
+    Object(Object),
+    /// A service the host offers each plugin on its own, offered this plugin nothing.
+    NotOffered,
+    /// No object the layer holds.
+    Unknown,
+}
+
+/// The object the host registers once for a service it offers each plugin on its own: each plugin reaching the
+/// registration is answered the object offered to it, and a plugin offered none, nothing.
+#[derive(Default)]
+pub(crate) struct OfferedToEach {
+    pub(crate) offers: Mutex<BTreeMap<Handle, Object>>,
 }
 
 impl ContextState {
@@ -55,6 +76,44 @@ impl ContextState {
             Some(Record::Service { object, .. }) => Some(object),
             _ => None,
         }
+    }
+
+    /// What the registration `registration` reaches for `plugin`: its object, or the one offered to `plugin` alone
+    /// where the host offers the service to each plugin on its own.
+    pub(crate) fn reached_by(&self, plugin: Handle, registration: Handle) -> Reached {
+        let Some(object) = self.object_of_registration(registration) else {
+            return Reached::Unknown;
+        };
+        let Some(offered) = object.downcast_ref::<OfferedToEach>() else {
+            return Reached::Object(object);
+        };
+        match offered
+            .offers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&plugin)
+        {
+            Some(object) => Reached::Object(object.clone()),
+            None => Reached::NotOffered,
+        }
+    }
+
+    /// The first operation the contract published for `capability` asks that `implementation` does not offer.
+    pub(crate) fn missing_operation(
+        &self,
+        capability: &str,
+        implementation: &Object,
+    ) -> Option<String> {
+        let contracts = self
+            .contracts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let operations = contracts.get(capability)?;
+        let offered = offered_operations(implementation);
+        operations
+            .iter()
+            .find(|operation| !offered.contains(operation))
+            .cloned()
     }
 
     pub(crate) fn object_of_implementation(&self, implementation: Handle) -> Option<super::Object> {
@@ -101,4 +160,22 @@ impl ContextState {
             sequence,
         });
     }
+}
+
+/// The operations an implementation offers by name: a [`crate::host::Methods`]'s names, or a bound definition's
+/// operations; none for any other object.
+fn offered_operations(implementation: &Object) -> Vec<String> {
+    if let Some(methods) = crate::host::methods_of(implementation) {
+        return methods.names();
+    }
+    implementation
+        .downcast_ref::<crate::host::BoundDefinition>()
+        .map(|bound| {
+            bound
+                .operation_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }

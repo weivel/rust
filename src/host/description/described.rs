@@ -56,6 +56,8 @@ pub(crate) struct Operation {
 /// every definition it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Description {
+    /// Where the description lies in its library, which a definition it describes crossing the plugin seam carries.
+    pub(crate) address: usize,
     pub(crate) definition: String,
     pub(crate) types: Vec<Type>,
     pub(crate) enums: Vec<Enum>,

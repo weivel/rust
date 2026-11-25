@@ -59,12 +59,19 @@ impl Listing {
 
 impl Context {
     /// Provides `implementation` of the capability `id`; it reaches consumers once the plugin's activation is
-    /// verified.
+    /// verified. Answers [`Answer::ContractMismatch`], the core not asked, when a loaded library publishes a contract
+    /// for `id` and the implementation does not offer one of its operations, as the host's `docs/host.md` says.
     pub fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer> {
         let state = match &self.inner.link {
             Link::Local(state) => state,
             Link::Seam(seam) => return seam.provide(id, implementation),
         };
+        if let Some(operation) = state.missing_operation(id, &implementation) {
+            return Err(Answer::ContractMismatch {
+                capability: id.to_owned(),
+                operation,
+            });
+        }
         let room = state.handles.reserve()?;
         let plugin = self.plugin();
         state.call(&self.inner, |hold| {

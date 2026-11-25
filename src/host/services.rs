@@ -39,9 +39,24 @@ impl HostService {
 impl Host {
     /// Registers a service the host itself supplies under `WEIVEL_HOST`: an activation plan counts it as provided by
     /// the host, and a consumer resolving it receives `service` itself. Answers the registration; [`Answer::Mistake`]
-    /// for an id a C library the host loaded declares; the core's refusal; [`Answer::Destroyed`] once the destroy has
-    /// been called.
+    /// for an id a C library the host loaded declares or the host offers to plugins one by one; the core's refusal;
+    /// [`Answer::Destroyed`] once the destroy has been called.
     pub fn register_host_service(&self, id: &str, service: Object) -> Result<HostService, Answer> {
+        if self.shared.offered().contains_key(id) {
+            return Err(Answer::Mistake(format!(
+                "{id} is offered to plugins one by one, so the host may not register it for every plugin as well"
+            )));
+        }
+        self.register_own_service(id, service)
+    }
+
+    /// Registers a service of the host's own as [`Host::register_host_service`] does, whatever is offered to plugins
+    /// one by one under its id.
+    pub(super) fn register_own_service(
+        &self,
+        id: &str,
+        service: Object,
+    ) -> Result<HostService, Answer> {
         if self.shared.is_destroy_called() {
             return Err(Answer::Destroyed);
         }

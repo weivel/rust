@@ -40,6 +40,10 @@ pub enum Value {
     Struct(Members),
     /// The standard's value tree, held by value or pointed at, or a VALUE answer.
     Tree(Tree),
+    /// A value node of kind NONE, held by value or pointed at, which `value.h` calls no value: what a pointer to a
+    /// value is handed when it must point at one holding nothing, as a host's `finished` is for an action that answered
+    /// nothing.
+    NoValue,
     /// An opaque object the provider made, released once when its last clone is dropped.
     Handle(DescribedHandle),
     /// A definition an answer carried, bound from the description nested in its carrier's.

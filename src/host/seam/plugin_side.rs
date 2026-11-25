@@ -8,23 +8,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::abi::{
-    Answering, CAPACITY_FIRST_SHAPE, COMPLETION_FIRST_SHAPE, CONTEXT_FIRST_SHAPE, CONTEXT_HOLD_END,
-    EVENT_CAPABILITY_PROVIDED, EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_DESCRIPTION_END,
-    EVENT_FIRST_SHAPE, EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING, EVENT_MAPPING_END,
-    EVENT_REACH_REFUSED, EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED,
-    EVENT_WATCH_UNREGISTERED, SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext,
-    SeamEntry, SeamEvent, SeamManifest, SeamNumber, SeamText, SeamWantLimits, carries,
-    failure_kind_code, lend_numbers, read_answered, read_manifest, read_numbers, read_refusal,
-    size_of_table,
+    ANSWER_FIRST_SHAPE, Answering, CAPACITY_FIRST_SHAPE, COMPLETION_FIRST_SHAPE,
+    CONTEXT_FIRST_SHAPE, CONTEXT_HOLD_END, CONTEXT_OFFER_METHODS_END, EVENT_CAPABILITY_PROVIDED,
+    EVENT_CAPABILITY_WITHDRAWN, EVENT_DEGRADED, EVENT_DESCRIPTION_END, EVENT_FIRST_SHAPE,
+    EVENT_HOLDINGS_RELEASED, EVENT_LIBRARY_UNLOADING, EVENT_MAPPING_END, EVENT_REACH_REFUSED,
+    EVENT_REVOKED, EVENT_WANT_SETTLED, EVENT_WATCH_REGISTERED, EVENT_WATCH_UNREGISTERED,
+    SeamAnswer, SeamAnswered, SeamCapacity, SeamCompletion, SeamContext, SeamEntry, SeamEvent,
+    SeamManifest, SeamNumber, SeamText, SeamTexts, SeamWantLimits, carries, copy_table,
+    failure_kind_code, lend_answered, lend_numbers, lend_texts, read_answered, read_manifest,
+    read_numbers, read_refusal, size_of_table,
 };
 use super::locked;
+use super::trees::{answering_of, decode};
 use crate::context::{
     CapabilityWatcher, CapacityAnswerer, Context, ForeignObject, Object, PluginEvent, Revocation,
     SeamCalls, ServiceWatcher, WantLimits, WantRecord, address_of,
 };
 use crate::core::{Answer, FailureKind, Handle, LogLevel, ReachKind, panic_text};
-use crate::host::description::{BoundDefinition, Holdings, Mapping, RemoteMapping};
+use crate::host::description::{BoundDefinition, Holdings, Mapping, RemoteMapping, Tree};
 use crate::host::entry::{Entry, Finished};
+use crate::host::methods::{MethodResult, methods_of};
 
 enum Watcher {
     Service(Arc<dyn ServiceWatcher>),
@@ -105,6 +108,52 @@ impl HostTable {
         };
         call(&self.table, &answer);
         slot.unwrap_or_else(|| Err(Answer::Defect("the host answered nothing".to_owned())))
+    }
+
+    /// Tells the host which methods its object `object` offers by name, before it crosses, where the host's table
+    /// carries that call; an object offering none, or a host that cannot hear it, is told nothing.
+    fn offer_methods_of(&self, object: &Object) -> Result<(), Answer> {
+        let Some(methods) = methods_of(object) else {
+            return Ok(());
+        };
+        let Some(offer_methods) = self
+            .table
+            .offer_methods
+            .filter(|_| carries(self.table.size, CONTEXT_OFFER_METHODS_END))
+        else {
+            return Ok(());
+        };
+        let names = methods.names();
+        let lent = lend_texts(&names);
+        let address = address_of(object);
+        // SAFETY: every argument lives for the call.
+        self.call(|table, answer| unsafe {
+            offer_methods(
+                table.data,
+                address,
+                SeamTexts {
+                    texts: lent.as_ptr(),
+                    count: lent.len(),
+                },
+                answer,
+            )
+        })
+        .map(|_| ())
+    }
+
+    /// Calls the method `name` of this side's own object at `address`, one it registered or provided.
+    fn call_method(
+        &self,
+        address: usize,
+        name: &str,
+        arguments: Option<&Tree>,
+    ) -> Option<MethodResult> {
+        let object = locked(&self.kept)
+            .objects
+            .iter()
+            .find(|(_, _, object)| address_of(object) == address)
+            .map(|(_, _, object)| object.clone())?;
+        methods_of(&object)?.call(name, arguments)
     }
 
     /// The object at `address` as this side holds it: its own, for one it handed across; the definition its
@@ -224,12 +273,17 @@ impl RemoteMapping for HostMapping {
     fn hold(&self) -> bool {
         // SAFETY: the call takes nothing but ids; the host answers 0 for a table or library it let go of.
         !self.closed.load(Ordering::Acquire)
-            && unsafe { (self.table.hold)(self.table.data, self.mapping) } != 0
+            && self
+                .table
+                .hold
+                .is_some_and(|hold| unsafe { hold(self.table.data, self.mapping) } != 0)
     }
 
     fn unhold(&self) {
-        // SAFETY: as above.
-        unsafe { (self.table.unhold)(self.table.data, self.mapping) };
+        if let Some(unhold) = self.table.unhold {
+            // SAFETY: as above.
+            unsafe { unhold(self.table.data, self.mapping) };
+        }
     }
 }
 
@@ -327,6 +381,12 @@ impl SeamCalls for HostTable {
             token
         });
         let address = address_of(&service);
+        if let Err(refused) = self.offer_methods_of(&service) {
+            if let Some(answerer_id) = answerer_id {
+                locked(&self.kept).answerers.remove(&answerer_id);
+            }
+            return Err(refused);
+        }
         // SAFETY: as above.
         let registered = self.call(|table, answer| unsafe {
             (table.register)(
@@ -388,6 +448,7 @@ impl SeamCalls for HostTable {
 
     fn provide(&self, id: &str, implementation: Object) -> Result<(), Answer> {
         let address = address_of(&implementation);
+        self.offer_methods_of(&implementation)?;
         // SAFETY: as above.
         self.call(|table, answer| unsafe {
             (table.provide)(table.data, SeamText::of(id), address, answer)
@@ -509,8 +570,8 @@ impl PluginSide {
                 "the host's context table is {size} bytes, below the {CONTEXT_FIRST_SHAPE} of its first shape"
             ));
         }
-        // SAFETY: the table reaches its first shape, every field this build reads.
-        let table = unsafe { std::ptr::read(table) };
+        // SAFETY: the table reaches its first shape, and every field past it is an optional function.
+        let table = unsafe { copy_table(table) };
         let mut contexts = locked(&self.contexts);
         if let Some((_, context)) = contexts.get(&table.data) {
             return Ok(context.clone());
@@ -543,6 +604,8 @@ pub fn seam_entry<E: Entry + 'static>(make: impl FnOnce() -> Arc<E>) -> *const S
             capacity: plugin_capacity,
             forget_context: plugin_forget_context,
             free: plugin_free,
+            action_names: Some(plugin_action_names),
+            call: Some(plugin_call),
         },
         entry,
         contexts: Mutex::new(HashMap::new()),
@@ -787,6 +850,65 @@ unsafe extern "C" fn plugin_capacity(
         // SAFETY: the answer and everything lent live for the call.
         unsafe { ((*answer).take)((*answer).data, u32::from(serves), lent.as_ptr(), lent.len()) };
     }));
+}
+
+/// Answers a call of the entry table to the host's answer: a call handed no answer it can take is not made.
+fn answer_the_host(answer: *const SeamAnswer, call: impl FnOnce() -> Result<Answering, Answer>) {
+    // SAFETY: a non-NULL answer begins with its `size`.
+    if answer.is_null() || !carries(unsafe { (*answer).size }, ANSWER_FIRST_SHAPE) {
+        return;
+    }
+    // SAFETY: the answer reaches its first shape, and is the host's for the length of the call.
+    let answer = unsafe { &*answer };
+    let outcome = catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|payload| {
+        Err(Answer::Defect(format!(
+            "the plugin's side of the seam panicked: {}",
+            panic_text(&*payload)
+        )))
+    });
+    // SAFETY: the answer's `take` is the host's, called once with what this call answered.
+    lend_answered(&outcome, |lent| unsafe { (answer.take)(answer.data, lent) });
+}
+
+unsafe extern "C" fn plugin_action_names(data: *const c_void, answer: *const SeamAnswer) {
+    answer_the_host(answer, || {
+        Ok(Answering {
+            texts: side_of(data).entry.actions().names(),
+            ..Answering::default()
+        })
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn plugin_call(
+    data: *const c_void,
+    context: u64,
+    address: usize,
+    name: SeamText,
+    bytes: *const u8,
+    byte_count: usize,
+    has_arguments: u32,
+    answer: *const SeamAnswer,
+) {
+    answer_the_host(answer, || {
+        // SAFETY: the name and the bytes are lent for the call.
+        let name = unsafe { name.read() };
+        let arguments = match has_arguments {
+            0 => None,
+            // SAFETY: as above.
+            _ => Some(
+                decode(unsafe { super::abi::lent(bytes, byte_count) }).map_err(Answer::Mistake)?,
+            ),
+        };
+        let side = side_of(data);
+        let result = if address == 0 {
+            side.entry.actions().call(&name, arguments.as_ref())
+        } else {
+            side.context_of(context)
+                .and_then(|(host, _)| host.call_method(address, &name, arguments.as_ref()))
+        };
+        answering_of(result)
+    });
 }
 
 unsafe extern "C" fn plugin_forget_context(data: *const c_void, context: u64) {

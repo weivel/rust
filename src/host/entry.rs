@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use super::methods::Methods;
 use crate::context::{Context, HostLog, Pending};
 use crate::core::{
     ActivationPlan, Answer, CoreOptions, DescribedDefinition, ErrorSink, Handle, Refusal,
@@ -23,6 +24,11 @@ pub trait Entry: Send + Sync {
     /// long it takes; a panic, or a result that settles with an error, goes to the error sink and the release goes on.
     fn deactivate(&self) -> Option<Pending<Finished>> {
         None
+    }
+
+    /// The actions the plugin offers by name, which a host program runs when its plan names one; none by default.
+    fn actions(&self) -> Methods {
+        Methods::new()
     }
 
     /// Hears that the host forgot the plugin of `context`, the last step of its release: nothing of the host's
@@ -107,4 +113,8 @@ pub struct HostOptions {
 pub trait DescriptionCheck: Send + Sync {
     /// Checks `described`, answering why not when it fails.
     fn check(&self, described: &DescribedDefinition) -> Result<(), Answer>;
+
+    /// Checks the description a C library publishes as a contract, which describes a definition the library serves
+    /// none of, so only the description itself is checked, answering why not when it fails.
+    fn check_contract(&self, description: &DescribedDefinition) -> Result<(), Answer>;
 }

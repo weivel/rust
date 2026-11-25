@@ -68,11 +68,13 @@ fn an_answer_with_its_lists_crosses_whole() {
         descriptions: Vec::new(),
         mapping: 0,
         mappings: Vec::new(),
+        bytes: vec![0, 1, 255],
     }))
     .expect("success crosses as success");
     assert_eq!(answered.number, 7);
     assert_eq!(answered.texts, vec!["a".to_owned(), "b".repeat(900)]);
     assert_eq!(answered.addresses, vec![1, 2, 3]);
+    assert_eq!(answered.bytes, vec![0, 1, 255]);
 }
 
 #[test]
@@ -119,6 +121,40 @@ fn an_entry_table_is_refused_below_its_first_shape_and_taken_longer() {
     assert!(entry_table_of(&longer, "longer").is_ok());
     // SAFETY: the table is the one `seam_entry` made, freed once.
     unsafe { (table.free)(table.data) };
+}
+
+#[test]
+fn an_entry_table_of_its_first_shape_is_taken_with_no_calls_of_methods() {
+    let table = plugin_entry_table();
+    assert!(table.action_names.is_some() && table.call.is_some());
+    let mut first_shape = table;
+    first_shape.size = ENTRY_FIRST_SHAPE as u32;
+    let taken = entry_table_of(&first_shape, "first shape").expect("the first shape is taken");
+    assert!(taken.action_names.is_none() && taken.call.is_none());
+    // SAFETY: the table is the one `seam_entry` made, freed once.
+    unsafe { (table.free)(table.data) };
+}
+
+#[test]
+fn a_contract_mismatch_crosses_whole() {
+    let mismatch = Answer::ContractMismatch {
+        capability: "stub-host.tally".to_owned(),
+        operation: "count".to_owned(),
+    };
+    assert_eq!(crossed(Err(mismatch.clone())).err(), Some(mismatch));
+}
+
+#[test]
+fn a_methods_answer_its_nothing_and_its_failure_cross_as_they_ended() {
+    use super::trees::{answering_of, result_of};
+    use crate::host::Tree;
+    let tree = Tree::Record(vec![("user".to_owned(), Tree::Text("someone".to_owned()))]);
+    for ended in [Ok(Some(tree)), Ok(None), Err("it threw".to_owned())] {
+        let read = result_of(crossed(answering_of(Some(ended.clone()))), "login");
+        assert_eq!(read, ended);
+    }
+    let not_offered = result_of(crossed(answering_of(None)), "login");
+    assert!(not_offered.is_err_and(|failure| failure.contains("no method login")));
 }
 
 static FINISHED: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
@@ -187,8 +223,9 @@ fn host_context_table(size: u32) -> SeamContext {
         provide,
         implementations: get,
         dispatches_here,
-        hold,
-        unhold,
+        hold: Some(hold),
+        unhold: Some(unhold),
+        offer_methods: None,
     }
 }
 

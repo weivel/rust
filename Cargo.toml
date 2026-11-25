@@ -11,5 +11,11 @@ publish = false
 name = "weivel_rust"
 path = "src/lib.rs"
 
+[[bin]]
+name = "weivel-host"
+path = "src/program/bin.rs"
+test = false
+doctest = false
+
 [workspace]
 members = ["scripts/native", "tests/plugins"]

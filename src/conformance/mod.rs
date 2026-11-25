@@ -16,6 +16,8 @@ mod description;
 mod driver;
 mod echo;
 #[forbid(unsafe_code)]
+mod host;
+#[forbid(unsafe_code)]
 mod library;
 #[forbid(unsafe_code)]
 mod lifecycle;
@@ -29,4 +31,8 @@ mod want;
 mod world;
 
 pub use driver::{LayerDriver, LayerVector, LayerWitness};
+pub use host::{
+    HOST_VECTOR_BOUND, HOST_VECTOR_ENTRY_SYMBOL, HostProgramFixtures, PLUGIN_WORDS_DIRECTORY,
+    run_pointer_file,
+};
 pub use shapes::DriverFailure;
