@@ -75,8 +75,11 @@ the host's binary receives a `ForeignObject` or a `BoundDefinition`, a plugin ac
 the host's own object, or its own object back for one it registered, and a typed view of one is a `#[repr(C)]` struct
 both sides compile. A described definition crosses with the description its library answered, so the plugin's side
 binds it into a `BoundDefinition` of its own, once per definition, whose enums it reads through its context and whose
-operations it calls as an in-process plugin does; that copy holds nothing of the host's, so a call through it after
-the library's unload is the plugin's defect, as a call through any definition after its holding ended is.
+operations it calls as an in-process plugin does. It crosses with the host's id of its library too, and that copy holds
+the library mapped through the host's context table for each call and release, as the host's own binding holds its
+library, so once the binary has closed a call through it answers unloaded rather than reaching unmapped code. Before an
+unload closes a library to calls, the host tells every plugin across the seam, which releases what its own bindings of
+that library got while it is still mapped.
 
 Each table is led by its `size`. A side refuses a table below its first shape, the fields it was first published with,
 reads a later field only where the other side's `size` reaches past it, and never reads past that `size`, so either
@@ -85,8 +88,11 @@ each table it receives is copied, every text and list is lent for one call, of a
 handed to the caller's own receiver before the call returns. A context and a completion cross as the host's id of
 them, found in the host's registry, so a call or a finish after the host let go of either answers destroyed or does
 nothing. When the host forgets a plugin it lets go of what it kept of it and tells the plugin's side to close and
-detach that context; when the host drops an entry it tells the plugin's side to free its table, and the library closes
-once every entry loaded from it is dropped.
+detach that context. When the host drops an entry, the seam's own thread tells the plugin's side to free its table and
+closes the library once no other entry of it is loaded, after every call any plugin made into the host has returned, so
+neither ever runs inside a call that returns into the library's code. A plugin's own threads must have left its code
+by the time it finishes its last activate or deactivate, since its library may close after that. Everything the host
+keeps of the seam is the host's own and goes with it, whether or not it was destroyed first.
 
 Every function on both sides catches a panic: a panic in a plugin's activate or deactivate is told to the host's error
 sink and finishes it as failed, so the host quarantines that plugin and goes on. A want made across the seam knows

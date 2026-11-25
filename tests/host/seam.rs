@@ -377,3 +377,175 @@ fn a_plugin_across_the_seam_reads_a_bound_definitions_enums_and_calls_it_as_an_i
     assert!(written[1].contains("I64(-5)"), "{written:?}");
     host.destroy().wait();
 }
+
+#[test]
+fn a_deactivate_finished_on_the_plugins_own_thread_neither_deadlocks_nor_closes_the_library_under_it()
+ {
+    let (host, _) = kept_host(HostScheduler::NoClock, HostOptions::default());
+    let late = host
+        .load_entry(&plugins_library(), Some("late_entry"))
+        .expect("the late plugin loads");
+    let plugin = host.register(manifest("late", &[], &[]), late).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    assert_eq!(activation.outcomes[0].wait().state, ActivationState::Active);
+    let released = host.release(plugin);
+    let (told, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = told.send(released.wait());
+    });
+    let settled = heard.recv_timeout(std::time::Duration::from_secs(10));
+    assert_eq!(settled, Ok(Ok(true)), "the release never settled");
+    host.destroy().wait();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+/// A host of the standard's described library, and its library loaded.
+fn described_and_loaded() -> (
+    weivel_rust::host::Host,
+    Arc<crate::Kept>,
+    weivel_rust::host::LoadedLibrary,
+) {
+    let check =
+        weivel_rust::standard::StandardDescriptions::load(shared_library("weivel_standard"))
+            .expect("the standard's description checks load");
+    let (host, kept) = kept_host(
+        HostScheduler::NoClock,
+        HostOptions {
+            description_check: Some(Arc::new(check)),
+            ..HostOptions::default()
+        },
+    );
+    let loaded = host
+        .load_library(
+            &shared_library("weivel_standard_described"),
+            &crate::libraries::described_declaration("described_walker_description"),
+        )
+        .expect("the described library loads");
+    (host, kept, loaded)
+}
+
+#[test]
+fn a_bound_definition_called_across_the_seam_while_its_holding_stands_after_the_unload_answers_as_in_process()
+ {
+    let _turn = crate::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (host, kept, loaded) = described_and_loaded();
+    let keeping = host
+        .load_entry(&plugins_library(), Some("keeping_entry"))
+        .expect("the keeping plugin loads");
+    let plugin = host
+        .register(manifest("keeper", &[], &["described-mirror"]), keeping)
+        .unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    assert_eq!(host.unload_library(&loaded), Ok(true));
+    drop(loaded);
+    assert_eq!(host.release(plugin).wait(), Ok(true));
+    let written = texts_written_by(&kept, "keeper");
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert!(
+        written[0].contains("I64(-5)"),
+        "the holding keeps the binary mapped: {written:?}"
+    );
+    host.destroy().wait();
+}
+
+#[test]
+fn a_stashed_bound_definition_called_after_its_plugin_and_library_are_gone_answers_unloaded() {
+    let _turn = crate::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (host, kept, loaded) = described_and_loaded();
+    let stashing = host
+        .load_entry(&plugins_library(), Some("stashing_entry"))
+        .expect("the stashing plugin loads");
+    let calling = host
+        .load_entry(&plugins_library(), Some("stash_calling_entry"))
+        .expect("the calling plugin loads");
+    let stasher = host
+        .register(manifest("stasher", &[], &["described-mirror"]), stashing)
+        .unwrap();
+    let activation = host.activate(&[stasher], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    assert_eq!(host.unload_library(&loaded), Ok(true));
+    drop(loaded);
+    assert_eq!(host.release(stasher).wait(), Ok(true));
+    let caller = host
+        .register(manifest("caller", &[], &[]), calling)
+        .unwrap();
+    let activation = host.activate(&[caller], EdgeSource::SERVICES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    let written = texts_written_by(&kept, "caller");
+    assert!(
+        written.iter().any(|text| text.contains("Unloaded")),
+        "{written:?}"
+    );
+    host.destroy().wait();
+}
+
+fn cursors_released(loaded: &weivel_rust::host::LoadedLibrary) -> u64 {
+    let mirror = loaded
+        .services()
+        .into_iter()
+        .find(|(id, _)| id == "described-mirror")
+        .map(|(_, object)| object)
+        .expect("the library registered its mirror");
+    let bound = mirror
+        .downcast_ref::<weivel_rust::host::BoundDefinition>()
+        .expect("the mirror is bound");
+    let counted = bound.call("count_releases", &weivel_rust::host::Inputs::new());
+    let Ok(weivel_rust::host::DescribedAnswer::Answered(answers)) = counted else {
+        panic!("count_releases answered {counted:?}");
+    };
+    match answers.value() {
+        Some(weivel_rust::host::Value::Struct(counts)) => match counts.get("cursors") {
+            Some(weivel_rust::host::Value::U64(cursors)) => *cursors,
+            other => panic!("count_releases counted cursors as {other:?}"),
+        },
+        other => panic!("count_releases answered {other:?}"),
+    }
+}
+
+#[test]
+fn the_unload_releases_what_a_plugin_across_the_seam_got_through_the_library_while_it_is_still_mapped()
+ {
+    let _turn = crate::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (keeping_host, _, keeping_loaded) = described_and_loaded();
+    let (host, kept, loaded) = described_and_loaded();
+    let cursoring = host
+        .load_entry(&plugins_library(), Some("cursoring_entry"))
+        .expect("the cursoring plugin loads");
+    let plugin = host
+        .register(manifest("walker", &[], &["described-walker"]), cursoring)
+        .unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::CAPABILITIES).unwrap();
+    assert_eq!(
+        activation.outcomes[0].wait().state,
+        ActivationState::Active,
+        "{:?}",
+        kept.failures()
+    );
+    let before = cursors_released(&keeping_loaded);
+    assert_eq!(host.unload_library(&loaded), Ok(true));
+    assert_eq!(cursors_released(&keeping_loaded), before + 1);
+    host.destroy().wait();
+    keeping_host.destroy().wait();
+}

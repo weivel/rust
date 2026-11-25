@@ -9,7 +9,7 @@ use super::abi::{
     ANSWERED_FIRST_SHAPE, Answering, CONTEXT_FIRST_SHAPE, ENTRY_FIRST_SHAPE, SeamAnswered,
     SeamCompletion, SeamContext, SeamEntry, SeamText, lend_answered, read_answered,
 };
-use super::host_side::{entry_table_of, kept_counts};
+use super::host_side::entry_table_of;
 use super::seam_entry;
 use crate::context::{Context, Pending};
 use crate::core::{
@@ -66,6 +66,8 @@ fn an_answer_with_its_lists_crosses_whole() {
         addresses: vec![1, 2, 3],
         description: 0,
         descriptions: Vec::new(),
+        mapping: 0,
+        mappings: Vec::new(),
     }))
     .expect("success crosses as success");
     assert_eq!(answered.number, 7);
@@ -163,6 +165,10 @@ fn host_context_table(size: u32) -> SeamContext {
     unsafe extern "C" fn dispatches_here(_: u64) -> u32 {
         0
     }
+    unsafe extern "C" fn hold(_: u64, _: u64) -> u32 {
+        0
+    }
+    unsafe extern "C" fn unhold(_: u64, _: u64) {}
     SeamContext {
         size,
         data: 1,
@@ -181,6 +187,8 @@ fn host_context_table(size: u32) -> SeamContext {
         provide,
         implementations: get,
         dispatches_here,
+        hold,
+        unhold,
     }
 }
 
@@ -265,9 +273,47 @@ fn what_the_host_keeps_of_a_plugin_across_the_seam_is_let_go_of_at_its_forget() 
         .outcomes
         .iter()
         .for_each(|outcome| drop(outcome.wait()));
-    assert_eq!(kept_counts().0, 2);
+    assert_eq!(host.shared.seam.kept_counts().0, 2);
     host.destroy().wait();
-    assert_eq!(kept_counts(), (0, 0));
+    assert_eq!(host.shared.seam.kept_counts(), (0, 0));
+}
+
+#[test]
+fn what_the_host_keeps_of_the_seam_goes_with_a_host_dropped_without_its_destroy() {
+    let plugins = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build")
+        .join("native")
+        .join(format!("{DLL_PREFIX}weivel_test_plugins{DLL_SUFFIX}"));
+    let host = Host::create(
+        &core_binary(),
+        HostOptions {
+            scheduler: HostScheduler::NoClock,
+            ..HostOptions::default()
+        },
+    )
+    .unwrap();
+    let entry = host
+        .load_entry(&plugins, Some("owning_entry"))
+        .expect("the plugin loads");
+    let manifest = Manifest {
+        import_name: "owner".to_owned(),
+        services_provided: vec![crate::core::ServiceOffer {
+            id: "owner:feed".to_owned(),
+            attributes: Vec::new(),
+        }],
+        ..Manifest::default()
+    };
+    let plugin = host.register(manifest, entry).unwrap();
+    let activation = host.activate(&[plugin], EdgeSource::SERVICES).unwrap();
+    drop(activation.outcomes[0].wait());
+    let registry = Arc::downgrade(&host.shared.seam);
+    assert_eq!(host.shared.seam.kept_counts().0, 1);
+    drop(activation);
+    drop(host);
+    assert!(
+        registry.upgrade().is_none(),
+        "the dropped host's seam registry is still kept"
+    );
 }
 
 #[derive(Default)]
@@ -318,6 +364,7 @@ fn an_event_is_ignored_below_its_first_shape_and_heard_longer() {
             refusal: super::abi::lend_refusal(None),
             settlement: std::ptr::null(),
             description: 0,
+            mapping: 0,
         };
         // SAFETY: the event lives for the call.
         unsafe { (table.hear)(table.data, &event) };
@@ -380,6 +427,7 @@ fn an_event_reaches_the_context_it_names_of_an_entry_activated_for_two_plugins()
         refusal: super::abi::lend_refusal(None),
         settlement: std::ptr::null(),
         description: 0,
+        mapping: 0,
     };
     // SAFETY: the event lives for the call.
     unsafe { (table.hear)(table.data, &event) };

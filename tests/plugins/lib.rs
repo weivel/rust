@@ -228,3 +228,128 @@ weivel_rust::export_entry!(owning_entry, Owning::default());
 weivel_rust::export_entry!(holding_entry, Holding);
 weivel_rust::export_entry!(waiting_entry, Waiting);
 weivel_rust::export_entry!(describing_entry, Describing);
+
+/// Keeps the described mirror it gets and calls it in its deactivate, which may come after the library's unload.
+#[derive(Default)]
+pub struct Keeping {
+    kept: Mutex<Option<(Context, Object)>>,
+}
+
+fn negate_through(mirror: &Object) -> String {
+    let Some(bound) = mirror.downcast_ref::<BoundDefinition>() else {
+        return "not bound".to_owned();
+    };
+    let inputs: Inputs = [("number".to_owned(), Value::I64(5))].into_iter().collect();
+    format!("{:?}", bound.call("negate", &inputs))
+}
+
+impl Entry for Keeping {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        match context.get("described-mirror") {
+            Ok(mirror) => {
+                *self.kept.lock().unwrap() = Some((context.clone(), mirror));
+                finished(Ok(()))
+            }
+            Err(refused) => finished(Err(refused.to_string())),
+        }
+    }
+
+    fn deactivate(&self) -> Option<Pending<Finished>> {
+        let kept = self.kept.lock().unwrap().take();
+        if let Some((context, mirror)) = kept {
+            write(&context, format!("answered {}", negate_through(&mirror)));
+        }
+        Some(finished(Ok(())))
+    }
+}
+
+/// Finishes its deactivate later, from a thread of its own.
+#[derive(Default)]
+pub struct LateDeactivating;
+
+impl Entry for LateDeactivating {
+    fn activate(&self, _: &Context) -> Pending<Finished> {
+        finished(Ok(()))
+    }
+
+    fn deactivate(&self) -> Option<Pending<Finished>> {
+        let (later, settle) = weivel_rust::context::pending();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            settle.settle(Ok(()));
+        });
+        Some(later)
+    }
+}
+
+static STASH: Mutex<Option<Object>> = Mutex::new(None);
+
+/// Stashes the described mirror where code of this library outlives its plugin.
+#[derive(Default)]
+pub struct Stashing;
+
+impl Entry for Stashing {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        match context.get("described-mirror") {
+            Ok(mirror) => {
+                *STASH.lock().unwrap() = Some(mirror);
+                finished(Ok(()))
+            }
+            Err(refused) => finished(Err(refused.to_string())),
+        }
+    }
+}
+
+/// Calls the stashed mirror, after the plugin that stashed it is gone.
+#[derive(Default)]
+pub struct StashCalling;
+
+impl Entry for StashCalling {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let Some(mirror) = STASH.lock().unwrap().clone() else {
+            return finished(Err("nothing is stashed".to_owned()));
+        };
+        write(
+            context,
+            format!("stash answered {}", negate_through(&mirror)),
+        );
+        finished(Ok(()))
+    }
+}
+
+/// Opens a cursor through the described walker and keeps it, so the library's unload is what releases it.
+#[derive(Default)]
+pub struct Cursoring {
+    kept: Mutex<Vec<Value>>,
+}
+
+impl Entry for Cursoring {
+    fn activate(&self, context: &Context) -> Pending<Finished> {
+        let walker = match context.get("described-walker") {
+            Ok(walker) => walker,
+            Err(refused) => return finished(Err(refused.to_string())),
+        };
+        let Some(bound) = walker.downcast_ref::<BoundDefinition>() else {
+            return finished(Err("the walker is not bound".to_owned()));
+        };
+        let inputs: Inputs = [("label".to_owned(), Value::Text(Some("walk".to_owned())))]
+            .into_iter()
+            .collect();
+        match bound.call("open", &inputs) {
+            Ok(weivel_rust::host::DescribedAnswer::Answered(answers)) => {
+                if let Some(cursor) = answers.value().cloned() {
+                    self.kept.lock().unwrap().push(cursor);
+                }
+                write(context, "opened".to_owned());
+                finished(Ok(()))
+            }
+            other => finished(Err(format!("open answered {other:?}"))),
+        }
+    }
+}
+
+weivel_rust::export_entry!(keeping_entry, Keeping::default());
+weivel_rust::export_entry!(late_entry, LateDeactivating);
+weivel_rust::export_entry!(stashing_entry, Stashing);
+weivel_rust::export_entry!(stash_calling_entry, StashCalling);
+weivel_rust::export_entry!(cursoring_entry, Cursoring::default());

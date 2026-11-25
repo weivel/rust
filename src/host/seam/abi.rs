@@ -58,6 +58,9 @@ pub struct SeamAnswered {
     /// description bound, so the other side binds the same definition from it.
     pub(super) description: usize,
     pub(super) descriptions: *const usize,
+    /// Appended: the host's id of the library the definition at `number`, and each of `addresses`, lies in.
+    pub(super) mapping: u64,
+    pub(super) mappings: *const u64,
 }
 
 /// Where the callee hands what it answered: `take` is called once, before the call returns, with `data`.
@@ -151,6 +154,10 @@ pub struct SeamContext {
     pub(super) provide: unsafe extern "C" fn(u64, SeamText, usize, *const SeamAnswer),
     pub(super) implementations: unsafe extern "C" fn(u64, SeamText, *const SeamAnswer),
     pub(super) dispatches_here: unsafe extern "C" fn(u64) -> u32,
+    /// Appended: holds the library a mapping id names mapped, answering 1, or 0 once it has closed; `unhold` lets go of
+    /// one hold.
+    pub(super) hold: unsafe extern "C" fn(u64, u64) -> u32,
+    pub(super) unhold: unsafe extern "C" fn(u64, u64),
 }
 
 /// What the host hands an activate or a deactivate to finish it with: `data` the host's id for it, so a finish after
@@ -180,6 +187,7 @@ pub(super) const EVENT_WATCH_REGISTERED: u32 = 6;
 pub(super) const EVENT_WATCH_UNREGISTERED: u32 = 7;
 pub(super) const EVENT_CAPABILITY_PROVIDED: u32 = 8;
 pub(super) const EVENT_CAPABILITY_WITHDRAWN: u32 = 9;
+pub(super) const EVENT_LIBRARY_UNLOADING: u32 = 10;
 
 /// What the host tells a plugin of an event about it, lent for the call. `context` is the context table's `data`,
 /// `token` the plugin's own id of the want or watch it concerns, and `settlement` a want's settlement.
@@ -198,6 +206,8 @@ pub struct SeamEvent {
     pub(super) settlement: *const SeamAnswered,
     /// Appended: the description of the definition at `address`, 0 for an object no description bound.
     pub(super) description: usize,
+    /// Appended: the host's id of the library that definition lies in, and the library an unloading names.
+    pub(super) mapping: u64,
 }
 
 /// A plugin's entry table, which its library's entry symbol answers. `data` is the plugin's; each function takes it
@@ -245,6 +255,8 @@ pub(super) const CONTEXT_FIRST_SHAPE: usize = first_shape!(SeamContext, dispatch
 pub(super) const COMPLETION_FIRST_SHAPE: usize = first_shape!(SeamCompletion, finish);
 pub(super) const EVENT_FIRST_SHAPE: usize = first_shape!(SeamEvent, settlement);
 pub(super) const EVENT_DESCRIPTION_END: usize = first_shape!(SeamEvent, description);
+pub(super) const EVENT_MAPPING_END: usize = first_shape!(SeamEvent, mapping);
+pub(super) const CONTEXT_HOLD_END: usize = first_shape!(SeamContext, unhold);
 pub(super) const ANSWER_FIRST_SHAPE: usize = first_shape!(SeamAnswer, take);
 pub(super) const ANSWERED_FIRST_SHAPE: usize = first_shape!(SeamAnswered, kind);
 pub(super) const MANIFEST_FIRST_SHAPE: usize = first_shape!(SeamManifest, services_consumed_count);
@@ -390,6 +402,8 @@ pub(super) struct Answering {
     pub(super) addresses: Vec<usize>,
     pub(super) description: usize,
     pub(super) descriptions: Vec<usize>,
+    pub(super) mapping: u64,
+    pub(super) mappings: Vec<u64>,
 }
 
 /// Lends `answered` to `take` for the length of the call.
@@ -436,6 +450,12 @@ pub(super) fn lend_answered(
         description: value.description,
         descriptions: if value.descriptions.len() == value.addresses.len() {
             value.descriptions.as_ptr()
+        } else {
+            std::ptr::null()
+        },
+        mapping: value.mapping,
+        mappings: if value.mappings.len() == value.addresses.len() {
+            value.mappings.as_ptr()
         } else {
             std::ptr::null()
         },
@@ -502,6 +522,17 @@ pub(super) unsafe fn read_answered(answered: &SeamAnswered) -> Result<Answering,
             descriptions: if reaches(first_shape!(SeamAnswered, descriptions)) {
                 // SAFETY: as above; the descriptions run beside the addresses.
                 unsafe { lent(answered.descriptions, answered.address_count) }.to_vec()
+            } else {
+                Vec::new()
+            },
+            mapping: if reaches(first_shape!(SeamAnswered, mapping)) {
+                answered.mapping
+            } else {
+                0
+            },
+            mappings: if reaches(first_shape!(SeamAnswered, mappings)) {
+                // SAFETY: as above; the mappings run beside the addresses.
+                unsafe { lent(answered.mappings, answered.address_count) }.to_vec()
             } else {
                 Vec::new()
             },
