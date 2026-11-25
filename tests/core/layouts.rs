@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use weivel_rust::core::declarations::{FieldLayout, StructLayout, core_struct_layouts};
+use weivel_rust::standard::declarations::standard_struct_layouts;
 
 use crate::support::program;
 
@@ -160,6 +161,65 @@ fn a_field_planted_at_the_wrong_offset_is_found() {
     );
     assert!(
         found[0].starts_with("weivel_refusal fields"),
+        "{}",
+        found[0]
+    );
+}
+
+#[test]
+fn every_standard_struct_the_crate_declares_matches_the_compilers() {
+    let printed = printed_by(&program("standard-layouts"));
+    let found = differences(&standard_struct_layouts(), &printed);
+    assert!(
+        found.is_empty(),
+        "the hand layouts differ from the standard's:
+{}",
+        found.join(
+            "
+"
+        )
+    );
+}
+
+#[test]
+fn the_crate_declares_every_struct_of_description_h_value_h_and_the_refusal() {
+    let declared: Vec<&str> = standard_struct_layouts()
+        .iter()
+        .map(|layout| layout.name)
+        .collect();
+    let wanted = [
+        "weivel_standard_described_member",
+        "weivel_standard_described_type",
+        "weivel_standard_described_enum_entry",
+        "weivel_standard_described_enum",
+        "weivel_standard_described_parameter",
+        "weivel_standard_described_operation",
+        "weivel_standard_description",
+        "weivel_standard_value",
+        "weivel_standard_entry",
+        "weivel_standard_value_tree",
+        "weivel_standard_refusal",
+    ];
+    assert_eq!(declared, wanted);
+}
+
+#[test]
+fn a_standard_field_planted_at_the_wrong_offset_is_found() {
+    let printed = printed_by(&program("standard-layouts"));
+    let mut planted = standard_struct_layouts();
+    let description = planted
+        .iter_mut()
+        .find(|layout| layout.name == "weivel_standard_description")
+        .expect("the description is declared");
+    description.fields[2].offset += 4;
+    let found = differences(&planted, &printed);
+    assert_eq!(
+        found.len(),
+        1,
+        "one planted offset is one difference: {found:?}"
+    );
+    assert!(
+        found[0].starts_with("weivel_standard_description fields"),
         "{}",
         found[0]
     );

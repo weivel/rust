@@ -6,12 +6,14 @@
 //! the plan and starts each plugin in its order without waiting for one before the next; [`Host::verify`],
 //! [`Host::release`] and [`Host::destroy`] follow the contract's order of a verification, a release and a destroy.
 //! [`Host::register_host_service`] offers a service of the host's own, [`Host::load_library`] a C library's services,
-//! and [`Host::load_entry`] a plugin built as a library of its own, reached through the plugin seam's C tables.
+//! each described definition as the [`BoundDefinition`] bound from its description, and [`Host::load_entry`] a plugin
+//! built as a library of its own, reached through the plugin seam's C tables.
 
 #[forbid(unsafe_code)]
 mod activation;
 #[forbid(unsafe_code)]
 mod declaration;
+mod description;
 #[forbid(unsafe_code)]
 mod entry;
 #[forbid(unsafe_code)]
@@ -28,6 +30,11 @@ pub use crate::core::{DescribedDefinition, LibraryBytes};
 pub use declaration::{
     FunctionKind, LibraryContract, LibraryDeclaration, LibraryFunction, LibraryServiceDeclaration,
 };
+pub use description::{
+    Answers, BoundDefinition, CallStatus, DescribedAnswer, DescribedCallError, DescribedHandle,
+    Inputs, Members, Tree, Value,
+};
+pub(crate) use description::{Layouts, abi as description_abi};
 pub use entry::{
     Activation, ActivationState, DescriptionCheck, Entry, Finished, HostOptions, HostScheduler,
     Outcome,

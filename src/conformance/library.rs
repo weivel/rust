@@ -328,7 +328,7 @@ impl LibraryRun {
             let listening = context.clone();
             context.listen(move |event| hear(&heard, &listening, &name, event));
         }
-        self.reported_from = (world.failures().len(), world.logs().len());
+        self.reported_from = world.reported_marks();
         Ok(())
     }
 
@@ -646,21 +646,6 @@ impl LibraryRun {
             })
     }
 
-    fn reported(&self, world: &DriverWorld) -> Json {
-        let (failures, logs) = self.reported_from;
-        let sunk = world
-            .failures()
-            .into_iter()
-            .skip(failures)
-            .map(|failure| format!("{failure:?}"));
-        let logged = world
-            .logs()
-            .into_iter()
-            .skip(logs)
-            .map(|record| format!("{record:?}"));
-        texts_json(sunk.chain(logged))
-    }
-
     pub(crate) fn observers<'a>(
         &'a self,
         world: &'a DriverWorld,
@@ -719,7 +704,10 @@ impl LibraryRun {
             "holdingsReleased",
             Box::new(|_| Ok(pairs_json(locked(&self.heard).holdings_released.clone()))),
         );
-        observers.insert("reported", Box::new(move |_| Ok(self.reported(world))));
+        observers.insert(
+            "reported",
+            Box::new(move |_| Ok(world.reported_since(self.reported_from))),
+        );
         observers
     }
 }

@@ -43,6 +43,12 @@ pub fn standard_json() -> weivel_rust::standard::StandardJson {
         .expect("the pinned standard loads")
 }
 
+/// The pinned standard's description checks, bound from its shared library.
+pub fn standard_descriptions() -> weivel_rust::standard::StandardDescriptions {
+    weivel_rust::standard::StandardDescriptions::load(shared_library("weivel_standard"))
+        .expect("the pinned standard's description checks load")
+}
+
 /// The pinned kit's layer vectors, under `siblings/conformance`.
 pub fn layer_vector_directory() -> PathBuf {
     let directory = repository_root()

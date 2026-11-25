@@ -1,9 +1,10 @@
 //! The host's own tests beside the layer suite: plugins across the plugin seam, C libraries and their descriptions,
-//! and the races between a release, a settling activate and the destroy.
+//! definitions bound from a description, and the races between a release, a settling activate and the destroy.
 
 #[path = "../support/mod.rs"]
 mod support;
 
+mod descriptions;
 mod libraries;
 mod races;
 mod seam;
