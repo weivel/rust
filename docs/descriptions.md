@@ -19,8 +19,8 @@ the binary closes and how a holder lets go is the same for a bound definition as
   offset: every member's offset and size, and every struct's size, must be what the description states, or the load is
   refused as the caller's mistake naming the member. So is a kind above the last the binding knows, an element a
   pointer or an array cannot hold, an operation of more than 7 parameters, one that takes no context first, a
-  description listing a `weivel_status` that is not `core.h`'s, and a definition whose struct ends before its first
-  shape.
+  description listing a `weivel_status` that is not `core.h`'s, a name in the description that is not UTF-8, and a
+  definition whose struct ends before its first shape.
 - **Plans are built at the load.** Each operation's steps, its answer and refusal blocks, its function, the
   definition's context and every release are made once; a call looks up only its operation by name. The described
   definition is registered awaiting releases as its `BoundDefinition`, whose `address` is the very address its
@@ -45,7 +45,10 @@ a `CallStatus`, and `detail` and `fix`: `Returned` with the provider's own `weiv
 REFUSED; `CallersMistake` for what was refused before anything was called, an operation the definition has none of or
 its provider does not offer (its pointer past the `size` the definition answered, or NULL there) included;
 `Unloaded` once the library's binary has closed; and `ProviderFault` for an answer the binding cannot read, as one
-nesting deeper than the limit or a record holding a key twice, which is released all the same. Every answer and the
+nesting deeper than the limit, a record holding a key twice or a text that is not UTF-8, which is never replaced; the
+answer is released all the same. A struct lies one level below the one holding it by value or reaching it through a
+pointer or an array, and both walks keep their own stack rather than recursing, so the limit is reached on any
+thread's stack. Every answer and the
 refusal are released, once their values are copied out, through the release the description names for each, but an
 answer carrying a definition; an answer naming no release, as a text the provider keeps, is released by no one.
 
@@ -55,7 +58,8 @@ answer carrying a definition; an answer naming no release, as a text the provide
   `DescribedHandle`, freed through the release its description names by `DescribedHandle::release`, by the drop of its
   last clone, or by its library's unload, which releases every handle still held while the binary is still mapped; any
   later release does nothing. Handed back as an input it must be live, of the same library and of the type the input
-  takes.
+  takes, and the call uses it until it returns: a release meanwhile, from another thread or by the unload, marks it
+  released at once and frees it only once the last call using it has returned.
 - **A definition an answer carries is bound too.** A DEFINITION answer or member is a `BoundDefinition`, bound from the
   description nested in its carrier's, whose layouts and plans were built at the load. It lives, with every handle and
   answer got through it, as long as the answer that carried it: `Answers::release` ends that answer, so every later
@@ -63,7 +67,9 @@ answer carrying a definition; an answer naming no release, as a text the provide
   got through it is released, then the answer through the release its description names. The drop of the answer and
   of every clone of the definitions it carried ends it too, and so does the library's unload.
 - **Binary lifetime.** A holding outlives the unload, so a bound definition stays callable while its holder holds it,
-  and answers `Unloaded` once the binary has closed; each call holds the binary mapped until it returns.
+  and answers `Unloaded` once the binary has closed; each call holds the binary mapped until it returns. The unload
+  shuts the library's holdings as it releases them, so a handle or a carried definition that a call still running
+  answers afterwards is released as it is answered.
 
 ## Enums and blocking
 

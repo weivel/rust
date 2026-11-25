@@ -16,9 +16,11 @@ mod invoke;
 mod layouts;
 mod memory;
 mod operations;
+mod read;
 mod reader;
 #[forbid(unsafe_code)]
 mod value;
+mod write;
 
 pub use definition::BoundDefinition;
 pub(crate) use definition::bind_described;
