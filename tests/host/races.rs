@@ -214,12 +214,39 @@ fn a_release_from_another_thread_deactivates_only_once_the_activate_returned() {
     host.destroy().wait();
 }
 
+/// Holds the dispatch: its activate runs as the dispatcher and stops until its test lets it return.
+struct HoldsTheDispatch {
+    gate: Gate,
+}
+
+impl Entry for HoldsTheDispatch {
+    fn activate(&self, _: &Context) -> Pending<Finished> {
+        self.gate.stop_here();
+        Pending::settled(Ok(()))
+    }
+}
+
+/// One thread holds the dispatch, so the destroy runs as a step of that dispatch once it is let go, while a second
+/// thread's open, started as a call made during that dispatch, is stopped at the clock its core call reads.
 #[test]
 fn the_destroy_waits_for_an_open_under_way() {
     let (host, kept, clock) = clocked_host();
+    let holding = Arc::new(HoldsTheDispatch {
+        gate: Gate::default(),
+    });
+    let holder = host
+        .register(manifest("holder", &[], &[]), holding.clone())
+        .unwrap();
     let plugin = host
         .register(manifest("opening", &[], &[]), Arc::new(Held::default()))
         .unwrap();
+    let dispatching_host = host.clone();
+    let dispatching = thread::spawn(move || {
+        dispatching_host
+            .activate(&[holder], EdgeSource::SERVICES)
+            .unwrap()
+    });
+    holding.gate.wait_until_reached();
     let opening_host = host.clone();
     let opening_clock = clock.clone();
     let opening = thread::spawn(move || {
@@ -230,6 +257,8 @@ fn the_destroy_waits_for_an_open_under_way() {
     });
     clock.gate.wait_until_reached();
     let destroyed = host.destroy();
+    holding.gate.open();
+    dispatching.join().unwrap();
     let waited = !destroyed.is_settled();
     clock.gate.open();
     let activation = opening.join().unwrap();
