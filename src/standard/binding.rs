@@ -262,7 +262,9 @@ fn functions_of(library: SharedLibrary) -> Result<StandardFunctions, LoadFailure
         Ok(StandardFunctions {
             load_manifest: std::mem::transmute::<*mut c_void, LoadManifest>(load_manifest),
             manifest_view: std::mem::transmute::<*mut c_void, ManifestView>(manifest_view),
-            manifest_language: std::mem::transmute::<*mut c_void, ManifestLanguage>(manifest_language),
+            manifest_language: std::mem::transmute::<*mut c_void, ManifestLanguage>(
+                manifest_language,
+            ),
             manifest_release: std::mem::transmute::<*mut c_void, ManifestRelease>(manifest_release),
             validation_release: std::mem::transmute::<*mut c_void, ValidationRelease>(
                 validation_release,
