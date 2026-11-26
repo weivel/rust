@@ -124,12 +124,16 @@ impl PluginRun {
                 planned.manifest
             )
         })?;
-        let manifest = self.standard.load_manifest(&json).map_err(|refused| {
-            format!(
-                "the standard refused its manifest {}: {refused}",
-                planned.manifest
-            )
-        })?;
+        let manifest = self
+            .standard
+            .load_manifest(&json)
+            .map_err(|refused| {
+                format!(
+                    "the standard refused its manifest {}: {refused}",
+                    planned.manifest
+                )
+            })?
+            .manifest;
         let import_name = manifest.import_name.clone();
         let entry = self
             .host

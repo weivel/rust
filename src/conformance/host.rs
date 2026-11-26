@@ -304,6 +304,7 @@ fn manifest_of(name: &str, plugin: &Members, in_order: &Tree, entry: &str) -> Tr
     let mut manifest = vec![
         ("api".to_owned(), Tree::Number(1.0)),
         ("importName".to_owned(), Tree::Text(name.to_owned())),
+        ("language".to_owned(), Tree::Text("rust".to_owned())),
         ("entry".to_owned(), Tree::Text(entry.to_owned())),
         ("services".to_owned(), Tree::Record(services)),
     ];

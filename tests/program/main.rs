@@ -69,7 +69,7 @@ fn the_command_line_runs_an_action_plan_to_its_end_and_exits_with_stops_code() {
     let directory = run_directory("action");
     write(
         &directory.join("provider/manifest.json"),
-        r#"{"api": 1, "importName": "provider", "entry": "entry",
+        r#"{"api": 1, "importName": "provider", "language": "rust", "entry": "entry",
             "services": {"provides": ["provider:probe"], "consumes": ["host:probe"]}}"#,
     );
     write(
@@ -164,7 +164,7 @@ fn a_running_host_answers_the_service_its_plugin_registered_until_it_stops() {
     let directory = run_directory("service");
     write(
         &directory.join("alpha/manifest.json"),
-        r#"{"api": 1, "importName": "alpha", "entry": "entry",
+        r#"{"api": 1, "importName": "alpha", "language": "rust", "entry": "entry",
             "services": {"provides": ["alpha:accounts"], "consumes": []}}"#,
     );
     write(

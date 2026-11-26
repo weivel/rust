@@ -18,7 +18,7 @@ mod json;
 #[forbid(unsafe_code)]
 mod services;
 
-pub use binding::{Standard, StandardRefused, StandardServiceIds};
+pub use binding::{LoadedManifest, Standard, StandardRefused, StandardServiceIds};
 pub use description::StandardDescriptions;
 pub use json::{Json, JsonRefusal, StandardJson};
 pub use services::{
