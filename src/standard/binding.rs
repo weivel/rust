@@ -81,6 +81,7 @@ type LoadManifest = unsafe extern "C" fn(
     *mut Validation,
 ) -> c_int;
 type ManifestView = unsafe extern "C" fn(*const c_void) -> *const c_void;
+type ManifestLanguage = unsafe extern "C" fn(*const c_void) -> *const c_char;
 type ManifestRelease = unsafe extern "C" fn(*mut c_void);
 type ValidationRelease = unsafe extern "C" fn(*mut Validation);
 type ReadLibrary =
@@ -92,6 +93,7 @@ type ServiceId = unsafe extern "C" fn() -> *const c_char;
 struct StandardFunctions {
     load_manifest: LoadManifest,
     manifest_view: ManifestView,
+    manifest_language: ManifestLanguage,
     manifest_release: ManifestRelease,
     validation_release: ValidationRelease,
     read_library: ReadLibrary,
@@ -115,6 +117,16 @@ pub struct StandardServiceIds {
     pub scope: String,
     /// `weivel.host`.
     pub host: String,
+}
+
+/// A manifest the standard validated and read: the core's `Manifest`, and beside it the language the manifest names,
+/// the weivel implementation that loads the plugin, which the core's manifest has no place for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedManifest {
+    /// The manifest as the core takes it.
+    pub manifest: Manifest,
+    /// The weivel implementation that loads the plugin, such as `rust`.
+    pub language: String,
 }
 
 /// Why the standard refused a document: its code of `standard.h`, what happened and what fixes it in English, and the
@@ -239,6 +251,7 @@ fn service_ids(library: &SharedLibrary) -> Result<StandardServiceIds, LoadFailur
 fn functions_of(library: SharedLibrary) -> Result<StandardFunctions, LoadFailure> {
     let load_manifest = resolve(&library, c"weivel_standard_load_manifest")?;
     let manifest_view = resolve(&library, c"weivel_standard_manifest_view")?;
+    let manifest_language = resolve(&library, c"weivel_standard_manifest_language")?;
     let manifest_release = resolve(&library, c"weivel_standard_manifest_release")?;
     let validation_release = resolve(&library, c"weivel_standard_validation_release")?;
     let read_library = resolve(&library, c"weivel_standard_read_library")?;
@@ -249,6 +262,7 @@ fn functions_of(library: SharedLibrary) -> Result<StandardFunctions, LoadFailure
         Ok(StandardFunctions {
             load_manifest: std::mem::transmute::<*mut c_void, LoadManifest>(load_manifest),
             manifest_view: std::mem::transmute::<*mut c_void, ManifestView>(manifest_view),
+            manifest_language: std::mem::transmute::<*mut c_void, ManifestLanguage>(manifest_language),
             manifest_release: std::mem::transmute::<*mut c_void, ManifestRelease>(manifest_release),
             validation_release: std::mem::transmute::<*mut c_void, ValidationRelease>(
                 validation_release,
@@ -291,8 +305,9 @@ impl Standard {
     }
 
     /// Validates a JSON manifest by the standard's schema and its rules, and reads it only when it is valid, as
-    /// `weivel_standard_load_manifest` does; answers the first field that is wrong, or the reader's refusal.
-    pub fn load_manifest(&self, json: &[u8]) -> Result<Manifest, StandardRefused> {
+    /// `weivel_standard_load_manifest` does, with the language it names beside it; answers the first field that is
+    /// wrong, or the reader's refusal.
+    pub fn load_manifest(&self, json: &[u8]) -> Result<LoadedManifest, StandardRefused> {
         let mut validation = Validation {
             size: size_of::<Validation>() as u32,
             valid: 0,
@@ -316,8 +331,14 @@ impl Standard {
             )
         };
         let answer = if status == STATUS_OK && !loaded.is_null() {
-            // SAFETY: the view of a loaded manifest lives until its release, and is a `weivel_manifest`.
-            Ok(unsafe { manifest_at((functions.manifest_view)(loaded)) })
+            // SAFETY: the view and the language of a loaded manifest live until its release, the view a
+            // `weivel_manifest`.
+            Ok(unsafe {
+                LoadedManifest {
+                    manifest: manifest_at((functions.manifest_view)(loaded)),
+                    language: text_at((functions.manifest_language)(loaded)),
+                }
+            })
         } else {
             Err(refused_from(&validation.refusal, status))
         };

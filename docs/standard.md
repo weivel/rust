@@ -9,7 +9,8 @@ defines, and the list of the standard's structs the crate declares by hand.
 `Standard::load` opens the standard's shared binary with the same loader the core's binary is opened with and
 resolves every function the crate calls of it, each declared by hand. `Standard::load_manifest` validates a JSON
 manifest by the standard's schema and rules and reads it only when it is valid, as `weivel_standard_load_manifest`
-does, into the core's `Manifest`; `Standard::read_library` reads a C library's declaration, its services, the
+does, into a `LoadedManifest`: the core's `Manifest`, and beside it the `language` the manifest names, the weivel
+implementation that loads the plugin, which the core's manifest has no place for; `Standard::read_library` reads a C library's declaration, its services, the
 description each declares and the contracts it publishes, into the host's `LibraryDeclaration`. Either answers a
 `StandardRefused` naming the standard's code, its detail and fix, and the field's path. `Standard::service_ids` are
 the ids the standard's binary answers, `weivel.config` to `weivel.host`, never ids the crate writes itself.

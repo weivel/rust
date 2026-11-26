@@ -105,12 +105,14 @@ fn a_declaration_the_rules_refuse_is_answered_at_its_field() {
 #[test]
 fn a_manifest_loads_and_one_the_schema_refuses_is_answered_at_its_field() {
     let standard = standard();
-    let manifest = standard
+    let loaded = standard
         .load_manifest(
-            br#"{"api": 1, "importName": "alpha", "entry": "entry",
+            br#"{"api": 1, "importName": "alpha", "language": "rust", "entry": "entry",
                 "services": {"consumes": ["weivel.log", {"id": "beta:feed", "optional": true}], "provides": ["alpha:accounts"]}}"#,
         )
         .expect("the manifest loads");
+    assert_eq!(loaded.language, "rust");
+    let manifest = loaded.manifest;
     assert_eq!(manifest.import_name, "alpha");
     assert_eq!(manifest.entry.as_deref(), Some("entry"));
     let consumed: Vec<(&str, Option<bool>)> = manifest
@@ -121,9 +123,26 @@ fn a_manifest_loads_and_one_the_schema_refuses_is_answered_at_its_field() {
     assert_eq!(consumed, [("weivel.log", None), ("beta:feed", Some(true))]);
     assert_eq!(manifest.services_provided[0].id, "alpha:accounts");
     let refused = standard
-        .load_manifest(br#"{"api": "one", "importName": "alpha"}"#)
+        .load_manifest(br#"{"api": "one", "importName": "alpha", "language": "rust"}"#)
         .expect_err("an api that is not a number is refused");
     assert_eq!(refused.path, "api", "{refused:?}");
+}
+
+#[test]
+fn a_manifest_naming_no_language_or_one_outside_the_grammar_is_refused_at_its_field() {
+    let standard = standard();
+    let missing = standard
+        .load_manifest(br#"{"api": 1, "importName": "alpha"}"#)
+        .expect_err("a manifest without a language is refused");
+    assert_eq!(missing.path, "language", "{missing:?}");
+    let spaced = standard
+        .load_manifest(br#"{"api": 1, "importName": "alpha", "language": "Type Script"}"#)
+        .expect_err("a language outside the grammar is refused");
+    assert_eq!(spaced.path, "language", "{spaced:?}");
+    let named = standard
+        .load_manifest(br#"{"api": 1, "importName": "alpha", "language": "c"}"#)
+        .expect("a manifest naming another implementation loads");
+    assert_eq!(named.language, "c");
 }
 
 fn run_directory() -> PathBuf {
