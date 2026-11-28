@@ -6,6 +6,7 @@ mod support;
 
 mod carried;
 mod descriptions;
+mod json;
 mod libraries;
 mod offers;
 mod races;

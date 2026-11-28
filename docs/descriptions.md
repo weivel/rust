@@ -42,6 +42,11 @@ answer and refusal blocks, from an arena the call's thread keeps and empties aga
 answer is made of. Where a wrong value lies is spelled out only when it is wrong. `tests/allocations` pins how many
 allocations a `reflect` and a `negate` make, so a call that grows slower by allocating fails a test.
 
+`Tree::to_json` writes a value tree as compact JSON for any caller that hands one on as text: each record's members in
+the order it holds them, a number in the shortest form that reads back as itself, and a text with its quote, backslash
+and control characters escaped. A number that is not finite has no JSON form and answers `NonFiniteNumber`, the first
+one met; the conformance suite writes each vector's files through it.
+
 A call answers `Ok(DescribedAnswer::Answered(answers))` on OK, each answer by name, a NULL pointer, a NULL handle, a
 NULL definition and a value of kind NONE left out, `Answers::value` reading an operation's one answer; and
 `Ok(DescribedAnswer::None)` on NONE. Anything else is a `DescribedCallError` carrying the `operation`, its `status` as

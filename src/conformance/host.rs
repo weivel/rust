@@ -125,60 +125,8 @@ fn tree_text(tree: &Tree, key: &str) -> Option<String> {
     }
 }
 
-fn write_json_text(text: &str, written: &mut String) {
-    written.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => written.push_str("\\\""),
-            '\\' => written.push_str("\\\\"),
-            '\n' => written.push_str("\\n"),
-            '\r' => written.push_str("\\r"),
-            '\t' => written.push_str("\\t"),
-            control if (control as u32) < 0x20 => {
-                written.push_str(&format!("\\u{:04x}", control as u32));
-            }
-            other => written.push(other),
-        }
-    }
-    written.push('"');
-}
-
-/// `tree` as compact JSON, each record's members in order, a number in the shortest form that reads back as itself.
-pub(super) fn json_of(tree: &Tree) -> String {
-    let mut written = String::new();
-    write_json(tree, &mut written);
-    written
-}
-
-fn write_json(tree: &Tree, written: &mut String) {
-    match tree {
-        Tree::Null => written.push_str("null"),
-        Tree::Boolean(flag) => written.push_str(if *flag { "true" } else { "false" }),
-        Tree::Number(number) => written.push_str(&number.to_string()),
-        Tree::Text(text) => write_json_text(text, written),
-        Tree::List(items) => {
-            written.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    written.push(',');
-                }
-                write_json(item, written);
-            }
-            written.push(']');
-        }
-        Tree::Record(members) => {
-            written.push('{');
-            for (index, (key, value)) in members.iter().enumerate() {
-                if index > 0 {
-                    written.push(',');
-                }
-                write_json_text(key, written);
-                written.push(':');
-                write_json(value, written);
-            }
-            written.push('}');
-        }
-    }
+fn json_of(tree: &Tree) -> Result<String, DriverFailure> {
+    tree.to_json().map_err(|refused| refused.to_string())
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), DriverFailure> {
@@ -387,14 +335,14 @@ fn lay_out(
                             .ok_or("a stub-host plugin has no manifest")?;
                         write_file(
                             &directory.join(manifest),
-                            &json_of(&manifest_of(&name, plugin, in_order, &entry_file)),
+                            &json_of(&manifest_of(&name, plugin, in_order, &entry_file))?,
                         )?;
                     }
                     write_file(
                         &directory
                             .join(PLUGIN_WORDS_DIRECTORY)
                             .join(format!("{name}.json")),
-                        &json_of(in_order),
+                        &json_of(in_order)?,
                     )?;
                     let Tree::Record(mut members) = stub.clone() else {
                         return Err(format!("the stub-host plugin {name} is not an object"));
@@ -416,7 +364,7 @@ fn lay_out(
     }
     write_file(
         &directory.join("stub-host.json"),
-        &json_of(&Tree::Record(written)),
+        &json_of(&Tree::Record(written))?,
     )
 }
 

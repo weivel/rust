@@ -15,6 +15,6 @@ The described definitions of the `host` module: a C library's definition bound f
 - [read.rs](../../../../../src/host/description/read.rs) - every answer read back from what its provider filled, on a stack of its own rather than by recursing
 - [reader.rs](../../../../../src/host/description/reader.rs) - reads a checked description into Rust values, a field past its answered `size` read as none
 - [stack.rs](../../../../../src/host/description/stack.rs) - the stack the walks keep their first items in place on, allocating only past them
-- [value.rs](../../../../../src/host/description/value.rs) - `Value`, `Tree`, what a call answers, and `DescribedCallError`
+- [value.rs](../../../../../src/host/description/value.rs) - `Value`, `Tree` and its JSON text, what a call answers, and `DescribedCallError`
 - [write.rs](../../../../../src/host/description/write.rs) - a call's inputs written into memory of its own, on a stack of its own rather than by recursing
 <!-- end generated -->

@@ -3,6 +3,7 @@ The `host` module's tests beside the layer suite: plugins across the plugin seam
 <!-- generated: source-children -->
 - [carried.rs](../../../../tests/host/carried.rs) - a scope's definition kept by a plugin across the seam, refused once the scope is released, as in process
 - [descriptions.rs](../../../../tests/host/descriptions.rs) - bound definitions beyond the vectors: enums through a context, a handle dropped, a carried definition kept alive, and the caller's mistakes
+- [json.rs](../../../../tests/host/json.rs) - a value tree written as JSON: a text's escapes, a record's member order, nesting, and the numbers JSON has no form for
 - [libraries.rs](../../../../tests/host/libraries.rs) - descriptions checked by the standard, a library of contracts alone, ids the host holds already, and a bytes service after its unload
 - [main.rs](../../../../tests/host/main.rs) - the test target, declaring each test file, with a host whose log and sink are kept and the entries the tests share
 - [offers.rs](../../../../tests/host/offers.rs) - services offered to one plugin alone, the object a plugin registered answered to the host, and a provide held to a published contract
