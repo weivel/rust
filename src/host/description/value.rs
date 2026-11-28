@@ -67,6 +67,79 @@ pub enum Tree {
     Record(Vec<(String, Tree)>),
 }
 
+impl Tree {
+    /// The tree as compact JSON, each record's members in the order it holds them and a number in the shortest form
+    /// that reads back as itself. A number that is not finite has no JSON form and is refused, as the first one met.
+    pub fn to_json(&self) -> Result<String, NonFiniteNumber> {
+        let mut written = String::new();
+        write_json(self, &mut written)?;
+        Ok(written)
+    }
+}
+
+/// A number a [`Tree`] held that JSON cannot write: NaN or an infinity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonFiniteNumber(pub f64);
+
+impl fmt::Display for NonFiniteNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "the number {} has no JSON form", self.0)
+    }
+}
+
+impl std::error::Error for NonFiniteNumber {}
+
+fn write_json(tree: &Tree, written: &mut String) -> Result<(), NonFiniteNumber> {
+    match tree {
+        Tree::Null => written.push_str("null"),
+        Tree::Boolean(flag) => written.push_str(if *flag { "true" } else { "false" }),
+        Tree::Number(number) if number.is_finite() => written.push_str(&number.to_string()),
+        Tree::Number(number) => return Err(NonFiniteNumber(*number)),
+        Tree::Text(text) => write_json_text(text, written),
+        Tree::List(items) => {
+            written.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    written.push(',');
+                }
+                write_json(item, written)?;
+            }
+            written.push(']');
+        }
+        Tree::Record(members) => {
+            written.push('{');
+            for (index, (key, value)) in members.iter().enumerate() {
+                if index > 0 {
+                    written.push(',');
+                }
+                write_json_text(key, written);
+                written.push(':');
+                write_json(value, written)?;
+            }
+            written.push('}');
+        }
+    }
+    Ok(())
+}
+
+fn write_json_text(text: &str, written: &mut String) {
+    written.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => written.push_str("\\\""),
+            '\\' => written.push_str("\\\\"),
+            '\n' => written.push_str("\\n"),
+            '\r' => written.push_str("\\r"),
+            '\t' => written.push_str("\\t"),
+            control if u32::from(control) < 0x20 => {
+                written.push_str(&format!("\\u{:04x}", u32::from(control)));
+            }
+            other => written.push(other),
+        }
+    }
+    written.push('"');
+}
+
 /// What a call answered on `WEIVEL_STATUS_OK` or `WEIVEL_STATUS_NONE`.
 #[derive(Debug)]
 pub enum DescribedAnswer {

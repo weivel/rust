@@ -32,6 +32,6 @@ pub use holdings::DescribedHandle;
 pub(crate) use holdings::{CarriedScope, Holdings, Mapping, RemoteMapping, ScopeCall};
 pub(crate) use layouts::Layouts;
 pub use value::{
-    Answers, CallStatus, DescribedAnswer, DescribedCallError, Inputs, Members, MembersIter, Tree,
-    Value,
+    Answers, CallStatus, DescribedAnswer, DescribedCallError, Inputs, Members, MembersIter,
+    NonFiniteNumber, Tree, Value,
 };
